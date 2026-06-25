@@ -7,7 +7,7 @@
 
 | Kişi | 42 Login | Sorumluluk |
 |------|----------|------------|
-| Kişi 1 | `___________` | Core / epoll / Network |
+| Kişi 1 | `__merilhan_` | Core / epoll / Network |
 | Kişi 2 | `___________` | HTTP Protocol Layer |
 | Kişi 3 | `___________` | Config / CGI / Features |
 
