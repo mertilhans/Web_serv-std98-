@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
@@ -355,15 +356,65 @@ std::string Server::resolveFilePath(LocationConfig *loc, const std::string &path
 	return fullPath;
 }
 
+bool readWholeFile(const std::string &path, std::string &content)
+{
+    std::ifstream file(path.c_str());
+    if (!file.is_open())
+        return false;
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    content = buffer.str();
+    return true;
+}
+
 bool Server::serveStaticFile(const std::string &fullPath, std::string &content)
 {
 	struct stat st;
 	if (stat(fullPath.c_str(), &st) == -1)
-		return false;
+		return (false);
 	if (!S_ISREG(st.st_mode))
-		return false;
+		return (false);
 
-	return readWholeFile(fullPath, content);
+	return (readWholeFile(fullPath, content));
+}
+void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+	std::string fullPath = resolveFilePath(loc, state.request.path);
+
+	struct stat st;
+	if (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+	{
+		if (!fullPath.empty() && fullPath[fullPath.size() - 1] != '/')
+			fullPath += "/";
+		fullPath += loc->index;
+	}
+
+	std::string content;
+	if (serveStaticFile(fullPath, content))
+	{
+		mClientWriteBuffers[fd] = buildResponse(200, "OK", content);
+		mClientReadBuffers.erase(fd);
+		mClientStates.erase(fd);
+		return;
+	}
+	sendErrorAndCleanup(fd, 404);
+	return;
+}
+
+void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+	if (state.request.method == "GET")
+	{
+		getHandle(state, loc, fd);
+		return;
+	}
+
+	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
+	mClientWriteBuffers[fd] = buildResponse(200, "OK", body);
+
+	mClientReadBuffers.erase(fd);
+	mClientStates.erase(fd);
 }
 
 void Server::finalizeRequest(int fd)
@@ -384,26 +435,7 @@ void Server::finalizeRequest(int fd)
 		return;
 	}
 
-	if (state.request.method == "GET")
-	{
-		std::string fullPath = resolveFilePath(loc, state.request.path);
-		std::string content;
-		if (serveStaticFile(fullPath, content))
-		{
-			mClientWriteBuffers[fd] = buildResponse(200, "OK", content);
-			mClientReadBuffers.erase(fd);
-			mClientStates.erase(fd);
-			return;
-		}
-		sendErrorAndCleanup(fd, 404);
-		return;
-	}
-
-	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
-	mClientWriteBuffers[fd] = buildResponse(200, "OK", body);
-
-	mClientReadBuffers.erase(fd);
-	mClientStates.erase(fd);
+	controlMethod(state, loc, fd);
 }
 
 void Server::processClient(int fd)

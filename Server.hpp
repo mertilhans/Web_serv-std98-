@@ -81,6 +81,9 @@ private:
     void closeClient(size_t i);
 	bool isPollin(size_t i);
 	bool isPollout(size_t i);
+	void controlMethod(ClientRequestState &state, LocationConfig *loc, int fd);
+	void getHandle(ClientRequestState &state, LocationConfig *loc, int fd);
+
 
 
 };
