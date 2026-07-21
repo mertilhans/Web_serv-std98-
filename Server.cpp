@@ -352,18 +352,28 @@ bool Server::isMethodAllowed(LocationConfig *loc, const std::string &method)
 	return (false);
 }
 
-std::string Server::resolveFilePath(LocationConfig *loc, const std::string &path)
+std::string Server::joinPath(const std::string &base, LocationConfig *loc, const std::string &path)
 {
 	std::string relative = path.substr(loc->path.size());
 	if (!relative.empty() && relative[0] == '/')
 		relative = relative.substr(1);
 
-	std::string fullPath = loc->root;
+	std::string fullPath = base;
 	if (!fullPath.empty() && fullPath[fullPath.size() - 1] != '/')
 		fullPath += "/";
 	fullPath += relative;
 
 	return fullPath;
+}
+
+std::string Server::resolveFilePath(LocationConfig *loc, const std::string &path)
+{
+	return joinPath(loc->root, loc, path);
+}
+
+std::string Server::resolveUploadPath(LocationConfig *loc, const std::string &path)
+{
+	return joinPath(loc->uploadPath, loc, path);
 }
 
 bool readWholeFile(const std::string &path, std::string &content)
@@ -388,6 +398,18 @@ bool Server::serveStaticFile(const std::string &fullPath, std::string &content)
 
 	return (readWholeFile(fullPath, content));
 }
+
+bool Server::writeUploadFile(const std::string &fullPath, const std::string &body)
+{
+	int fd = open(fullPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd == -1)
+		return (false);
+
+	ssize_t written = write(fd, body.c_str(), body.size());
+	close(fd);
+
+	return (written == static_cast<ssize_t>(body.size()));
+}
 bool Server::buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out)
 {
 	DIR *dir = opendir(dirPath.c_str());
@@ -395,7 +417,7 @@ bool Server::buildAutoindex(const std::string &dirPath, const std::string &reque
 		return (false);
 
 	std::ostringstream html;
-	//html << "<html><body><h1>Index of " << requestPath << "</h1><ul>";
+	html << "<html><body><h1>Index of " << requestPath << "</h1><ul>";
 
 	struct dirent *entry;
 	while ((entry = readdir(dir)) != NULL)
@@ -452,11 +474,37 @@ void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	return;
 }
 
+void Server::postHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+	if (loc->uploadPath.empty())
+	{
+		sendErrorAndCleanup(fd, 403);
+		return;
+	}
+
+	std::string fullPath = resolveUploadPath(loc, state.request.path);
+
+	if (writeUploadFile(fullPath, mClientReadBuffers[fd]))
+	{
+		sendResponseAndCleanup(fd, buildResponse(201, "Created",
+			"<html><body><h1>201 Created</h1></body></html>"));
+		return;
+	}
+
+	sendErrorAndCleanup(fd, 500);
+}
+
 void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int fd)
 {
 	if (state.request.method == "GET")
 	{
 		getHandle(state, loc, fd);
+		return;
+	}
+
+	if (state.request.method == "POST")
+	{
+		postHandle(state, loc, fd);
 		return;
 	}
 

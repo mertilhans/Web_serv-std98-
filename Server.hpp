@@ -73,8 +73,11 @@ private:
 	ServerConfig *selectServerConfig(int fd);
 	LocationConfig *selectLocation(ServerConfig *cfg, const std::string &path);
 	bool isMethodAllowed(LocationConfig *loc, const std::string &method);
+	std::string joinPath(const std::string &base, LocationConfig *loc, const std::string &path);
 	std::string resolveFilePath(LocationConfig *loc, const std::string &path);
+	std::string resolveUploadPath(LocationConfig *loc, const std::string &path);
 	bool serveStaticFile(const std::string &fullPath, std::string &content);
+	bool writeUploadFile(const std::string &fullPath, const std::string &body);
 	bool buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out);
     std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body);
     std::string buildErrorResponse(int statusCode);
@@ -86,6 +89,7 @@ private:
 	bool isPollout(size_t i);
 	void controlMethod(ClientRequestState &state, LocationConfig *loc, int fd);
 	void getHandle(ClientRequestState &state, LocationConfig *loc, int fd);
+	void postHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 
 
 
