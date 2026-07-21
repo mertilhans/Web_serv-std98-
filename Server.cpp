@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -206,40 +207,49 @@ std::string Server::buildResponse(int statusCode, const std::string &statusText,
 }
 
 
+std::string Server::buildRedirect(const std::string &location)
+{
+	std::ostringstream oss;
+	oss << "HTTP/1.1 301 Moved Permanently\r\n"
+		<< "Location: " << location << "\r\n"
+		<< "Content-Length: 0\r\n"
+		<< "Connection: close\r\n"
+		<< "\r\n";
+	return oss.str();
+}
+
 std::string Server::buildErrorResponse(int statusCode)
 {
+	std::string statusText;
+
 	switch (statusCode)
 	{
-		case 400:
-			return buildResponse(400, "Bad Request",
-				"<html><body><h1>400 Bad Request</h1></body></html>");
-		case 403:
-			return buildResponse(403, "Forbidden",
-				"<html><body><h1>403 Forbidden</h1></body></html>");
-		case 404:
-			return buildResponse(404, "Not Found",
-				"<html><body><h1>404 Not Found</h1></body></html>");
-		case 405:
-			return buildResponse(405, "Method Not Allowed",
-				"<html><body><h1>405 Method Not Allowed</h1></body></html>");
-		case 413:
-			return buildResponse(413, "Payload Too Large",
-				"<html><body><h1>413 Payload Too Large</h1></body></html>");
-		case 500:
-			return buildResponse(500, "Internal Server Error",
-				"<html><body><h1>500 Internal Server Error</h1></body></html>");
-		default:
-			return buildResponse(statusCode, "Error",
-				"<html><body><h1>Error</h1></body></html>");
+		case 400: statusText = "Bad Request"; break;
+		case 403: statusText = "Forbidden"; break;
+		case 404: statusText = "Not Found"; break;
+		case 405: statusText = "Method Not Allowed"; break;
+		case 413: statusText = "Payload Too Large"; break;
+		case 500: statusText = "Internal Server Error"; break;
+		default:  statusText = "Error"; break;
 	}
+
+	std::ostringstream body;
+	body << "<html><body><h1>" << statusCode << " " << statusText << "</h1></body></html>";
+
+	return buildResponse(statusCode, statusText, body.str());
 }
 
 
-void Server::sendErrorAndCleanup(int fd, int statusCode)
+void Server::sendResponseAndCleanup(int fd, const std::string &response)
 {
-	mClientWriteBuffers[fd] = buildErrorResponse(statusCode);
+	mClientWriteBuffers[fd] = response;
 	mClientReadBuffers.erase(fd);
 	mClientStates.erase(fd);
+}
+
+void Server::sendErrorAndCleanup(int fd, int statusCode)
+{
+	sendResponseAndCleanup(fd, buildErrorResponse(statusCode));
 }
 
 bool Server::tryParseHeaders(int fd)
@@ -378,26 +388,66 @@ bool Server::serveStaticFile(const std::string &fullPath, std::string &content)
 
 	return (readWholeFile(fullPath, content));
 }
+bool Server::buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out)
+{
+	DIR *dir = opendir(dirPath.c_str());
+	if (!dir)
+		return (false);
+
+	std::ostringstream html;
+	//html << "<html><body><h1>Index of " << requestPath << "</h1><ul>";
+
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL)
+	{
+		std::string name = entry->d_name;
+		if (name == ".")
+			continue;
+		html << "<li><a href=\"" << name << "\">" << name << "</a></li>";
+	}
+	closedir(dir);
+
+	html << "</ul></body></html>";
+	out = html.str();
+	return (true);
+}
+
 void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 {
 	std::string fullPath = resolveFilePath(loc, state.request.path);
 
 	struct stat st;
-	if (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+	bool isDir = (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+
+	if (isDir && (state.request.path.empty() || state.request.path[state.request.path.size() - 1] != '/'))
+	{
+		sendResponseAndCleanup(fd, buildRedirect(state.request.path + "/"));
+		return;
+	}
+
+	std::string dirPath;
+
+	if (isDir)
 	{
 		if (!fullPath.empty() && fullPath[fullPath.size() - 1] != '/')
 			fullPath += "/";
+		dirPath = fullPath;
 		fullPath += loc->index;
 	}
 
 	std::string content;
 	if (serveStaticFile(fullPath, content))
 	{
-		mClientWriteBuffers[fd] = buildResponse(200, "OK", content);
-		mClientReadBuffers.erase(fd);
-		mClientStates.erase(fd);
+		sendResponseAndCleanup(fd, buildResponse(200, "OK", content));
 		return;
 	}
+
+	if (isDir && loc->autoindex && buildAutoindex(dirPath, state.request.path, content))
+	{
+		sendResponseAndCleanup(fd, buildResponse(200, "OK", content));
+		return;
+	}
+
 	sendErrorAndCleanup(fd, 404);
 	return;
 }
@@ -411,10 +461,7 @@ void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int f
 	}
 
 	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
-	mClientWriteBuffers[fd] = buildResponse(200, "OK", body);
-
-	mClientReadBuffers.erase(fd);
-	mClientStates.erase(fd);
+	sendResponseAndCleanup(fd, buildResponse(200, "OK", body));
 }
 
 void Server::finalizeRequest(int fd)

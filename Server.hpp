@@ -75,9 +75,12 @@ private:
 	bool isMethodAllowed(LocationConfig *loc, const std::string &method);
 	std::string resolveFilePath(LocationConfig *loc, const std::string &path);
 	bool serveStaticFile(const std::string &fullPath, std::string &content);
+	bool buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out);
     std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body);
     std::string buildErrorResponse(int statusCode);
+    std::string buildRedirect(const std::string &location);
     void sendErrorAndCleanup(int fd, int statusCode);
+    void sendResponseAndCleanup(int fd, const std::string &response);
     void closeClient(size_t i);
 	bool isPollin(size_t i);
 	bool isPollout(size_t i);
