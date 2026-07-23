@@ -7,6 +7,7 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <cstdio>
 #include <cstring>
 #include <cerrno>
 #include <fstream>
@@ -14,6 +15,9 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstdlib>
+
+#define POLL_TIMEOUT_MS 1000
+#define CLIENT_TIMEOUT_SECONDS 30
 
 Server::Server(std::vector<ServerConfig> &configs) : mConfigs(configs)
 {
@@ -171,6 +175,8 @@ void Server::acceptNewClient(int listenFd)
     if (ls)
         mClientListenSockets[clientFd] = ls;
 
+    mClientLastActivity[clientFd] = time(NULL);
+
     struct pollfd pfd;
     pfd.fd      = clientFd;
     pfd.events  = POLLIN;
@@ -218,7 +224,7 @@ std::string Server::buildRedirect(const std::string &location)
 	return oss.str();
 }
 
-std::string Server::buildErrorResponse(int statusCode)
+std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
 {
 	std::string statusText;
 
@@ -231,6 +237,17 @@ std::string Server::buildErrorResponse(int statusCode)
 		case 413: statusText = "Payload Too Large"; break;
 		case 500: statusText = "Internal Server Error"; break;
 		default:  statusText = "Error"; break;
+	}
+
+	if (cfg)
+	{
+		std::map<int, std::string>::const_iterator it = cfg->errorPages.find(statusCode);
+		if (it != cfg->errorPages.end())
+		{
+			std::string content;
+			if (readWholeFile(it->second, content))
+				return buildResponse(statusCode, statusText, content);
+		}
 	}
 
 	std::ostringstream body;
@@ -249,9 +266,34 @@ void Server::sendResponseAndCleanup(int fd, const std::string &response)
 
 void Server::sendErrorAndCleanup(int fd, int statusCode)
 {
-	sendResponseAndCleanup(fd, buildErrorResponse(statusCode));
+	ServerConfig *cfg = NULL;
+	std::map<int, ClientRequestState>::iterator it = mClientStates.find(fd);
+	if (it != mClientStates.end())
+		cfg = it->second.matchedConfig;
+
+	sendResponseAndCleanup(fd, buildErrorResponse(statusCode, cfg));
 }
 
+
+bool Server::contentLengthCheck(ClientRequestState &state, int fd)
+{
+		std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
+	if (clIt != state.request.headers.end())
+		state.contentLength = static_cast<size_t>(std::atol(clIt->second.c_str()));
+
+	std::map<std::string, std::string>::iterator teIt = state.request.headers.find("Transfer-Encoding");
+	if (teIt != state.request.headers.end() && teIt->second.find("chunked") != std::string::npos)
+		state.isChunked = true;
+
+	state.matchedConfig = selectServerConfig(fd);
+	if (!state.isChunked && state.matchedConfig && state.contentLength > state.matchedConfig->clientMaxBodySize)
+	{
+		sendErrorAndCleanup(fd,413);
+		return (false);
+	}
+	return(true);
+
+}
 bool Server::tryParseHeaders(int fd)
 {
 	size_t headerEnd = mClientReadBuffers[fd].find("\r\n\r\n");
@@ -279,10 +321,10 @@ bool Server::tryParseHeaders(int fd)
 		sendErrorAndCleanup(fd, 400);
 		return false;
 	}
+	
+	if (!(contentLengthCheck(state, fd)))
+		return(false);
 
-	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
-	if (clIt != state.request.headers.end())
-		state.contentLength = static_cast<size_t>(std::atol(clIt->second.c_str()));
 
 	state.headersParsed = true;
 	return true;
@@ -291,6 +333,45 @@ bool Server::tryParseHeaders(int fd)
 bool Server::isBodyComplete(int fd)
 {
 	return mClientReadBuffers[fd].size() >= mClientStates[fd].contentLength;
+}
+
+ChunkResult Server::tryUnchunk(const std::string &raw, std::string &decoded)
+{
+	size_t pos = 0;
+	decoded.clear();
+
+	while (true)
+	{
+		size_t lineEnd = raw.find("\r\n", pos);
+		if (lineEnd == std::string::npos)
+			return CHUNK_INCOMPLETE;
+
+		std::string sizeLine = raw.substr(pos, lineEnd - pos);
+		size_t semicolon = sizeLine.find(';');
+		if (semicolon != std::string::npos)
+			sizeLine = sizeLine.substr(0, semicolon);
+
+		if (sizeLine.empty() || sizeLine.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+			return CHUNK_INVALID;
+
+		size_t chunkSize = std::strtoul(sizeLine.c_str(), NULL, 16);
+		pos = lineEnd + 2;
+
+		if (chunkSize == 0)
+		{
+			if (pos + 2 > raw.size())
+				return CHUNK_INCOMPLETE;
+			return raw.compare(pos, 2, "\r\n") == 0 ? CHUNK_COMPLETE : CHUNK_INVALID;
+		}
+
+		if (pos + chunkSize + 2 > raw.size())
+			return CHUNK_INCOMPLETE;
+		if (raw.compare(pos + chunkSize, 2, "\r\n") != 0)
+			return CHUNK_INVALID;
+
+		decoded.append(raw, pos, chunkSize);
+		pos += chunkSize + 2;
+	}
 }
 
 
@@ -319,6 +400,17 @@ ServerConfig *Server::selectServerConfig(int fd)
 
 	return ls->configs[0];
 }
+bool Server::isPathPrefixMatch(const std::string &path, const std::string &locPath)
+{
+	if (path.compare(0, locPath.size(), locPath) != 0)
+		return (false);
+	if (locPath.size() == path.size())
+		return (true);
+	if (!locPath.empty() && locPath[locPath.size() - 1] == '/')
+		return (true);
+	return (path[locPath.size()] == '/');
+}
+
 LocationConfig *Server::selectLocation(ServerConfig *cfg, const std::string &path)
 {
 	LocationConfig *bestLocation = NULL;
@@ -326,8 +418,8 @@ LocationConfig *Server::selectLocation(ServerConfig *cfg, const std::string &pat
 	for (size_t i = 0; i < cfg->locations.size(); ++i)
 	{
 		LocationConfig &loc = cfg->locations[i];
-		
-		if (path.find(loc.path) == 0)
+
+		if (isPathPrefixMatch(path, loc.path))
 		{
 			if (!bestLocation || loc.path.size() > bestLocation->path.size())
 			{
@@ -352,11 +444,34 @@ bool Server::isMethodAllowed(LocationConfig *loc, const std::string &method)
 	return (false);
 }
 
+bool Server::hasDotDotSegment(const std::string &path)
+{
+	size_t pos = 0;
+
+	while (pos < path.size())
+	{
+		size_t slash = path.find('/', pos);
+		std::string segment = (slash == std::string::npos) ? path.substr(pos) : path.substr(pos, slash - pos);
+
+		if (segment == "..")
+			return true;
+
+		if (slash == std::string::npos)
+			break;
+		pos = slash + 1;
+	}
+
+	return false;
+}
+
 std::string Server::joinPath(const std::string &base, LocationConfig *loc, const std::string &path)
 {
 	std::string relative = path.substr(loc->path.size());
 	if (!relative.empty() && relative[0] == '/')
 		relative = relative.substr(1);
+
+	if (hasDotDotSegment(relative))
+		return "";
 
 	std::string fullPath = base;
 	if (!fullPath.empty() && fullPath[fullPath.size() - 1] != '/')
@@ -484,6 +599,12 @@ void Server::postHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 
 	std::string fullPath = resolveUploadPath(loc, state.request.path);
 
+	if (fullPath.empty() || fullPath[fullPath.size() - 1] == '/')
+	{
+		sendErrorAndCleanup(fd, 400);
+		return;
+	}
+
 	if (writeUploadFile(fullPath, mClientReadBuffers[fd]))
 	{
 		sendResponseAndCleanup(fd, buildResponse(201, "Created",
@@ -492,6 +613,39 @@ void Server::postHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	}
 
 	sendErrorAndCleanup(fd, 500);
+}
+
+void Server::deleteHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+	if (loc->uploadPath.empty())
+	{
+		sendErrorAndCleanup(fd, 403);
+		return;
+	}
+
+	std::string fullPath = resolveUploadPath(loc, state.request.path);
+
+	if (fullPath.empty() || fullPath[fullPath.size() - 1] == '/')
+	{
+		sendErrorAndCleanup(fd, 400);
+		return;
+	}
+
+	struct stat st;
+	if (stat(fullPath.c_str(), &st) == -1 || !S_ISREG(st.st_mode))
+	{
+		sendErrorAndCleanup(fd, 404);
+		return;
+	}
+
+	if (remove(fullPath.c_str()) != 0)
+	{
+		sendErrorAndCleanup(fd, 500);
+		return;
+	}
+
+	sendResponseAndCleanup(fd, buildResponse(200, "OK",
+		"<html><body><h1>200 OK</h1><p>Deleted</p></body></html>"));
 }
 
 void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int fd)
@@ -508,6 +662,12 @@ void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int f
 		return;
 	}
 
+	if (state.request.method == "DELETE")
+	{
+		deleteHandle(state, loc, fd);
+		return;
+	}
+
 	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
 	sendResponseAndCleanup(fd, buildResponse(200, "OK", body));
 }
@@ -515,7 +675,6 @@ void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int f
 void Server::finalizeRequest(int fd)
 {
 	ClientRequestState &state = mClientStates[fd];
-	state.matchedConfig = selectServerConfig(fd);
 
 	LocationConfig *loc = state.matchedConfig ? selectLocation(state.matchedConfig, state.request.path) : NULL;
 	if (!loc)
@@ -538,8 +697,32 @@ void Server::processClient(int fd)
 	if (!mClientStates[fd].headersParsed && !tryParseHeaders(fd))
 		return;
 
-	if (!isBodyComplete(fd))
+	ClientRequestState &state = mClientStates[fd];
+
+	if (state.isChunked)
+	{
+		std::string decoded;
+		ChunkResult result = tryUnchunk(mClientReadBuffers[fd], decoded);
+
+		if (result == CHUNK_INVALID)
+		{
+			sendErrorAndCleanup(fd, 400);
+			return;
+		}
+		if (result == CHUNK_INCOMPLETE)
+			return;
+
+		if (state.matchedConfig && decoded.size() > state.matchedConfig->clientMaxBodySize)
+		{
+			sendErrorAndCleanup(fd, 413);
+			return;
+		}
+		mClientReadBuffers[fd] = decoded;
+	}
+	else if (!isBodyComplete(fd))
+	{
 		return;
+	}
 
 	finalizeRequest(fd);
 }
@@ -587,6 +770,7 @@ bool Server::readClientData(int fd)
 	if (bytesRead <= 0)
 		return true;
 
+	mClientLastActivity[fd] = time(NULL);
 	mClientReadBuffers[fd].append(buffer, bytesRead);
 	processClient(fd);
 
@@ -616,6 +800,7 @@ void Server::closeClient(size_t i)
 	mClientWriteBuffers.erase(mPollFds[i].fd);
 	mClientStates.erase(mPollFds[i].fd);
 	mClientListenSockets.erase(mPollFds[i].fd);
+	mClientLastActivity.erase(mPollFds[i].fd);
 	close(mPollFds[i].fd);
 	mPollFds.erase(mPollFds.begin() + i);
 }
@@ -669,13 +854,26 @@ bool Server::isPollout(size_t i)
 	return(false);
 
 }
+
+bool Server::isClientTimedOut(size_t i)
+{
+	int fd = mPollFds[i].fd;
+	if (isListeningSocket(fd))
+		return false;
+
+	std::map<int, time_t>::iterator it = mClientLastActivity.find(fd);
+	if (it == mClientLastActivity.end())
+		return false;
+
+	return (time(NULL) - it->second) > CLIENT_TIMEOUT_SECONDS;
+}
 void Server::listeningSockets()
 {
 	for(;;)
 	{
 		int ready;
 
-		ready = poll(&mPollFds[0], mPollFds.size(), -1);
+		ready = poll(&mPollFds[0], mPollFds.size(), POLL_TIMEOUT_MS);
 		if (ready == -1)
 		{
 			if (errno == EINTR)
@@ -693,6 +891,13 @@ void Server::listeningSockets()
 
 			if (!erased && (mPollFds[i].revents & POLLOUT))
 				erased = isPollout(i);
+
+			if (!erased && isClientTimedOut(i))
+			{
+				closeClient(i);
+				erased = true;
+			}
+
 			if (!erased)
 				++i;
 		}
