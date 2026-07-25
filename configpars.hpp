@@ -30,7 +30,7 @@ struct ServerConfig
     std::string                     host;
     int                              port;
     std::vector<std::string>        serverNames;
-    std::map<int, std::string>      errorPages;      // 404 -> "/404.html"
+    std::map<int, std::string>      errorPages;
     size_t                          clientMaxBodySize;
     std::vector<LocationConfig>     locations;
 

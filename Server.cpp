@@ -15,6 +15,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstdlib>
+#include <map>
+#include <string>
 
 #define POLL_TIMEOUT_MS 1000
 #define CLIENT_TIMEOUT_SECONDS 30
@@ -35,7 +37,7 @@ Server::~Server()
     }
 }
 
-void addrinfo_data(struct addrinfo *info)
+void addrInfoData(struct addrinfo *info)
 {
 
 	std::memset(info, 0, sizeof(*info));
@@ -61,18 +63,17 @@ void socket_and_bind(struct addrinfo *res, int *fd)
 		if (*fd == -1)
 			continue;
 	
-		int yes = 1;
-		setsockopt(*fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+		int enable = 1;
+		setsockopt(*fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
 	
-		if (fcntl(*fd, F_SETFL, O_NONBLOCK) == -1) {
+		if (fcntl(*fd, F_SETFL, O_NONBLOCK) == -1) 
+		{
 			close(*fd);
 			*fd = -1;
 			continue;
 		}
-	
 		if (bind(*fd, it->ai_addr, it->ai_addrlen) == 0)
 			break;
-	
 		close(*fd);
 		*fd = -1;
 	}
@@ -82,7 +83,7 @@ int Server::createListenSocket(const std::string &host, int port)
 	struct addrinfo info;
 	struct addrinfo *res = NULL;
 
-	addrinfo_data(&info);
+	addrInfoData(&info);
     std::ostringstream portStream;
     portStream << port;
 
@@ -98,13 +99,14 @@ int Server::createListenSocket(const std::string &host, int port)
     if (fd == -1)
         throw std::runtime_error(host + ":" + portStream.str() + ": " + strerror(errno));
 
-    if (listen(fd, SOMAXCONN) == -1) {
+    if (listen(fd, SOMAXCONN) == -1) 
+	{
         int savedErrno = errno;
         close(fd);
         throw std::runtime_error(host + ":" + portStream.str() + ": listen: " + strerror(savedErrno));
     }
 
-    return fd;
+    return (fd);
 }
 
 
@@ -125,7 +127,6 @@ void Server::setupSockets()
             }
 			j++;
         }
-
         if (existing)
 		{
             existing->configs.push_back(&cfg);
@@ -170,13 +171,10 @@ void Server::acceptNewClient(int listenFd)
         close(clientFd);
         return;
     }
-
     ListenSocket *ls = findListenSocket(listenFd);
     if (ls)
         mClientListenSockets[clientFd] = ls;
-
     mClientLastActivity[clientFd] = time(NULL);
-
     struct pollfd pfd;
     pfd.fd      = clientFd;
     pfd.events  = POLLIN;
@@ -184,60 +182,112 @@ void Server::acceptNewClient(int listenFd)
     mPollFds.push_back(pfd);
 }
 
-
-
 bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 {
 	std::istringstream iss(line);
 
 	if (!(iss >> req.method >> req.path >> req.version))
-		return false;
+		return (false);
 
 	std::string extra;
 	if (iss >> extra)
-		return false;
+		return (false);
 
-	return true;
+	size_t qpos = req.path.find('?');
+	if (qpos != std::string::npos)
+	{
+		req.query = req.path.substr(qpos + 1);
+		req.path = req.path.substr(0, qpos);
+	}
+
+	return (true);
 }
 
-std::string Server::buildResponse(int statusCode, const std::string &statusText, const std::string &body)
+std::string Server::buildResponse(int statusCode, const std::string &statusText, const std::string &body, const std::string &contentType)
 {
-	std::ostringstream oss;
-	oss << "HTTP/1.1 " << statusCode << " " << statusText << "\r\n"
+	std::ostringstream response;
+	response << "HTTP/1.1 " << statusCode << " " << statusText << "\r\n"
 		<< "Content-Length: " << body.size() << "\r\n"
-		<< "Content-Type: text/html\r\n"
+		<< "Content-Type: " << contentType << "\r\n"
 		<< "Connection: close\r\n"
 		<< "\r\n"
 		<< body;
-	return oss.str();
+	return (response.str());
+}
+
+static std::map<std::string, std::string> createMimeTypes()
+{
+    std::map<std::string, std::string> mimeType;
+    mimeType["html"] = "text/html";
+    mimeType["htm"]  = "text/html";
+    mimeType["css"]  = "text/css";
+    mimeType["js"]   = "application/javascript";
+    mimeType["txt"]  = "text/plain";
+    mimeType["json"] = "application/json";
+    mimeType["png"]  = "image/png";
+    mimeType["jpg"]  = "image/jpeg";
+    mimeType["jpeg"] = "image/jpeg";
+    mimeType["gif"]  = "image/gif";
+    mimeType["svg"]  = "image/svg+xml";
+    mimeType["ico"]  = "image/x-icon";
+    mimeType["pdf"]  = "application/pdf";
+    return (mimeType);
+}
+
+std::string Server::getContentType(const std::string &path)
+{
+    static const std::map<std::string, std::string> mimeTypes = createMimeTypes();
+
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return ("application/octet-stream");
+
+    std::string ext = path.substr(dot + 1);
+
+    std::map<std::string, std::string>::const_iterator it = mimeTypes.find(ext);
+    if (it != mimeTypes.end())
+        return (it->second);
+
+    return ("application/octet-stream");
 }
 
 
 std::string Server::buildRedirect(const std::string &location)
 {
-	std::ostringstream oss;
-	oss << "HTTP/1.1 301 Moved Permanently\r\n"
+	std::ostringstream redirect;
+	redirect << "HTTP/1.1 301 Moved Permanently\r\n"
 		<< "Location: " << location << "\r\n"
 		<< "Content-Length: 0\r\n"
 		<< "Connection: close\r\n"
 		<< "\r\n";
-	return oss.str();
+	return (redirect.str());
+}
+
+
+static const StatusEntry StatusTable[] = 
+{
+	{ 400, "Bad Request" },
+	{ 403, "Forbidden" },
+	{ 404, "Not Found" },
+	{ 405, "Method Not Allowed" },
+	{ 413, "Payload Too Large" },
+	{ 500, "Internal Server Error" }
+};
+
+static std::string statusTextFor(int statusCode)
+{
+	size_t count = sizeof(StatusTable) / sizeof(StatusTable[0]);
+	for (size_t i = 0; i < count; ++i)
+	{
+		if (StatusTable[i].code == statusCode)
+			return (StatusTable[i].text);
+	}
+	return ("Error");
 }
 
 std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
 {
-	std::string statusText;
-
-	switch (statusCode)
-	{
-		case 400: statusText = "Bad Request"; break;
-		case 403: statusText = "Forbidden"; break;
-		case 404: statusText = "Not Found"; break;
-		case 405: statusText = "Method Not Allowed"; break;
-		case 413: statusText = "Payload Too Large"; break;
-		case 500: statusText = "Internal Server Error"; break;
-		default:  statusText = "Error"; break;
-	}
+	std::string statusText = statusTextFor(statusCode);
 
 	if (cfg)
 	{
@@ -246,14 +296,14 @@ std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
 		{
 			std::string content;
 			if (readWholeFile(it->second, content))
-				return buildResponse(statusCode, statusText, content);
+				return (buildResponse(statusCode, statusText, content));
 		}
 	}
 
 	std::ostringstream body;
 	body << "<html><body><h1>" << statusCode << " " << statusText << "</h1></body></html>";
 
-	return buildResponse(statusCode, statusText, body.str());
+	return (buildResponse(statusCode, statusText, body.str()));
 }
 
 
@@ -277,7 +327,7 @@ void Server::sendErrorAndCleanup(int fd, int statusCode)
 
 bool Server::contentLengthCheck(ClientRequestState &state, int fd)
 {
-		std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
+	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
 	if (clIt != state.request.headers.end())
 		state.contentLength = static_cast<size_t>(std::atol(clIt->second.c_str()));
 
@@ -298,7 +348,7 @@ bool Server::tryParseHeaders(int fd)
 {
 	size_t headerEnd = mClientReadBuffers[fd].find("\r\n\r\n");
 	if (headerEnd == std::string::npos)
-		return false;
+		return (false);
 
 	ClientRequestState &state = mClientStates[fd];
 
@@ -319,15 +369,12 @@ bool Server::tryParseHeaders(int fd)
 	if (!requestLineOk || !headersOk)
 	{
 		sendErrorAndCleanup(fd, 400);
-		return false;
+		return (false);
 	}
-	
 	if (!(contentLengthCheck(state, fd)))
 		return(false);
-
-
 	state.headersParsed = true;
-	return true;
+	return (true);
 }
 
 bool Server::isBodyComplete(int fd)
@@ -344,7 +391,7 @@ ChunkResult Server::tryUnchunk(const std::string &raw, std::string &decoded)
 	{
 		size_t lineEnd = raw.find("\r\n", pos);
 		if (lineEnd == std::string::npos)
-			return CHUNK_INCOMPLETE;
+			return (CHUNK_INCOMPLETE);
 
 		std::string sizeLine = raw.substr(pos, lineEnd - pos);
 		size_t semicolon = sizeLine.find(';');
@@ -352,7 +399,7 @@ ChunkResult Server::tryUnchunk(const std::string &raw, std::string &decoded)
 			sizeLine = sizeLine.substr(0, semicolon);
 
 		if (sizeLine.empty() || sizeLine.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-			return CHUNK_INVALID;
+			return (CHUNK_INVALID);
 
 		size_t chunkSize = std::strtoul(sizeLine.c_str(), NULL, 16);
 		pos = lineEnd + 2;
@@ -360,14 +407,14 @@ ChunkResult Server::tryUnchunk(const std::string &raw, std::string &decoded)
 		if (chunkSize == 0)
 		{
 			if (pos + 2 > raw.size())
-				return CHUNK_INCOMPLETE;
-			return raw.compare(pos, 2, "\r\n") == 0 ? CHUNK_COMPLETE : CHUNK_INVALID;
+				return (CHUNK_INCOMPLETE);
+			return (raw.compare(pos, 2, "\r\n") == 0 ? CHUNK_COMPLETE : CHUNK_INVALID);
 		}
 
 		if (pos + chunkSize + 2 > raw.size())
-			return CHUNK_INCOMPLETE;
+			return (CHUNK_INCOMPLETE);
 		if (raw.compare(pos + chunkSize, 2, "\r\n") != 0)
-			return CHUNK_INVALID;
+			return (CHUNK_INVALID);
 
 		decoded.append(raw, pos, chunkSize);
 		pos += chunkSize + 2;
@@ -478,29 +525,29 @@ std::string Server::joinPath(const std::string &base, LocationConfig *loc, const
 		fullPath += "/";
 	fullPath += relative;
 
-	return fullPath;
+	return (fullPath);
 }
 
 std::string Server::resolveFilePath(LocationConfig *loc, const std::string &path)
 {
-	return joinPath(loc->root, loc, path);
+	return (joinPath(loc->root, loc, path));
 }
 
 std::string Server::resolveUploadPath(LocationConfig *loc, const std::string &path)
 {
-	return joinPath(loc->uploadPath, loc, path);
+	return (joinPath(loc->uploadPath, loc, path));
 }
 
 bool readWholeFile(const std::string &path, std::string &content)
 {
     std::ifstream file(path.c_str());
     if (!file.is_open())
-        return false;
+        return (false);
 
     std::ostringstream buffer;
     buffer << file.rdbuf();
     content = buffer.str();
-    return true;
+    return (true);
 }
 
 bool Server::serveStaticFile(const std::string &fullPath, std::string &content)
@@ -572,10 +619,17 @@ void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 		fullPath += loc->index;
 	}
 
+	struct stat fileSt;
+	if (stat(fullPath.c_str(), &fileSt) == 0 && S_ISREG(fileSt.st_mode) && access(fullPath.c_str(), R_OK) != 0)
+	{
+		sendErrorAndCleanup(fd, 403);
+		return;
+	}
+
 	std::string content;
 	if (serveStaticFile(fullPath, content))
 	{
-		sendResponseAndCleanup(fd, buildResponse(200, "OK", content));
+		sendResponseAndCleanup(fd, buildResponse(200, "OK", content, getContentType(fullPath)));
 		return;
 	}
 
@@ -605,10 +659,17 @@ void Server::postHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 		return;
 	}
 
+	struct stat existSt;
+	bool alreadyExisted = (stat(fullPath.c_str(), &existSt) == 0);
+
 	if (writeUploadFile(fullPath, mClientReadBuffers[fd]))
 	{
-		sendResponseAndCleanup(fd, buildResponse(201, "Created",
-			"<html><body><h1>201 Created</h1></body></html>"));
+		if (alreadyExisted)
+			sendResponseAndCleanup(fd, buildResponse(200, "OK",
+				"<html><body><h1>200 OK</h1></body></html>"));
+		else
+			sendResponseAndCleanup(fd, buildResponse(201, "Created",
+				"<html><body><h1>201 Created</h1></body></html>"));
 		return;
 	}
 
@@ -680,6 +741,12 @@ void Server::finalizeRequest(int fd)
 	if (!loc)
 	{
 		sendErrorAndCleanup(fd, 404);
+		return;
+	}
+
+	if (!loc->redirectTarget.empty())
+	{
+		sendResponseAndCleanup(fd, buildRedirect(loc->redirectTarget));
 		return;
 	}
 
@@ -880,24 +947,19 @@ void Server::listeningSockets()
 				continue;
 			throw std::runtime_error(std::string("poll: ") + strerror(errno));
 		}
-
 		size_t i = 0;
 		while (i < mPollFds.size())
 		{
 			bool erased = false;
-
 			if (mPollFds[i].revents & POLLIN)
 				erased = isPollin(i);
-
 			if (!erased && (mPollFds[i].revents & POLLOUT))
 				erased = isPollout(i);
-
 			if (!erased && isClientTimedOut(i))
 			{
 				closeClient(i);
 				erased = true;
 			}
-
 			if (!erased)
 				++i;
 		}

@@ -9,6 +9,12 @@
 #include "configpars.hpp"
 
 
+struct StatusEntry
+{
+	int         code;
+	const char  *text;
+};
+
 enum ChunkResult
 {
     CHUNK_INCOMPLETE,
@@ -16,10 +22,14 @@ enum ChunkResult
     CHUNK_INVALID
 };
 
+
+
+
 struct HttpRequest
 {
     std::string method;
     std::string path;
+    std::string query;
     std::string version;
     std::map<std::string, std::string> headers;
 };
@@ -91,7 +101,8 @@ private:
 	bool serveStaticFile(const std::string &fullPath, std::string &content);
 	bool writeUploadFile(const std::string &fullPath, const std::string &body);
 	bool buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out);
-    std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body);
+    std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body, const std::string &contentType = "text/html");
+    std::string getContentType(const std::string &path);
     std::string buildErrorResponse(int statusCode, ServerConfig *cfg);
     std::string buildRedirect(const std::string &location);
     void sendErrorAndCleanup(int fd, int statusCode);
