@@ -98,7 +98,6 @@ private:
 	std::string joinPath(const std::string &base, LocationConfig *loc, const std::string &path);
 	std::string resolveFilePath(LocationConfig *loc, const std::string &path);
 	std::string resolveUploadPath(LocationConfig *loc, const std::string &path);
-	bool serveStaticFile(const std::string &fullPath, std::string &content);
 	bool writeUploadFile(const std::string &fullPath, const std::string &body);
 	bool buildAutoindex(const std::string &dirPath, const std::string &requestPath, std::string &out);
     std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body, const std::string &contentType = "text/html");

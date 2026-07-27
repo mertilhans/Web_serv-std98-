@@ -194,6 +194,8 @@ bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 		return (false);
 
 	size_t qpos = req.path.find('?');
+
+	//Mr.Mertilhnass, you will process the query string in CGI...
 	if (qpos != std::string::npos)
 	{
 		req.query = req.path.substr(qpos + 1);
@@ -291,6 +293,7 @@ std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
 
 	if (cfg)
 	{
+		//Tuzan bey sen config içerisinde errorpageleri tutacaksın ben burada yönlendiricem varsa.
 		std::map<int, std::string>::const_iterator it = cfg->errorPages.find(statusCode);
 		if (it != cfg->errorPages.end())
 		{
@@ -355,11 +358,7 @@ bool Server::tryParseHeaders(int fd)
 	std::string headerBlock = mClientReadBuffers[fd].substr(0, headerEnd);
 	size_t firstLineEnd = headerBlock.find("\r\n");
 
-	std::string requestLine;
-	if (firstLineEnd == std::string::npos)
-		requestLine = headerBlock;
-	else
-		requestLine = headerBlock.substr(0, firstLineEnd);
+	std::string requestLine = headerBlock.substr(0, firstLineEnd);
 
 	bool requestLineOk = parseRequestLine(requestLine, state.request);
 	bool headersOk = parseHeaderLines(headerBlock, state.request);
@@ -550,17 +549,6 @@ bool readWholeFile(const std::string &path, std::string &content)
     return (true);
 }
 
-bool Server::serveStaticFile(const std::string &fullPath, std::string &content)
-{
-	struct stat st;
-	if (stat(fullPath.c_str(), &st) == -1)
-		return (false);
-	if (!S_ISREG(st.st_mode))
-		return (false);
-
-	return (readWholeFile(fullPath, content));
-}
-
 bool Server::writeUploadFile(const std::string &fullPath, const std::string &body)
 {
 	int fd = open(fullPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -601,14 +589,14 @@ void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	std::string fullPath = resolveFilePath(loc, state.request.path);
 
 	struct stat st;
-	bool isDir = (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+	bool exists = (stat(fullPath.c_str(), &st) == 0);
+	bool isDir = (exists && S_ISDIR(st.st_mode));
 
 	if (isDir && (state.request.path.empty() || state.request.path[state.request.path.size() - 1] != '/'))
 	{
 		sendResponseAndCleanup(fd, buildRedirect(state.request.path + "/"));
 		return;
 	}
-
 	std::string dirPath;
 
 	if (isDir)
@@ -617,17 +605,17 @@ void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 			fullPath += "/";
 		dirPath = fullPath;
 		fullPath += loc->index;
+		exists = (stat(fullPath.c_str(), &st) == 0);
 	}
 
-	struct stat fileSt;
-	if (stat(fullPath.c_str(), &fileSt) == 0 && S_ISREG(fileSt.st_mode) && access(fullPath.c_str(), R_OK) != 0)
+	if (exists && S_ISREG(st.st_mode) && access(fullPath.c_str(), R_OK) != 0)
 	{
 		sendErrorAndCleanup(fd, 403);
 		return;
 	}
 
 	std::string content;
-	if (serveStaticFile(fullPath, content))
+	if (exists && S_ISREG(st.st_mode) && readWholeFile(fullPath, content))
 	{
 		sendResponseAndCleanup(fd, buildResponse(200, "OK", content, getContentType(fullPath)));
 		return;
@@ -636,6 +624,12 @@ void Server::getHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	if (isDir && loc->autoindex && buildAutoindex(dirPath, state.request.path, content))
 	{
 		sendResponseAndCleanup(fd, buildResponse(200, "OK", content));
+		return;
+	}
+
+	if (isDir)
+	{
+		sendErrorAndCleanup(fd, 403);
 		return;
 	}
 
@@ -662,7 +656,11 @@ void Server::postHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	struct stat existSt;
 	bool alreadyExisted = (stat(fullPath.c_str(), &existSt) == 0);
 
-	if (writeUploadFile(fullPath, mClientReadBuffers[fd]))
+	std::string body = state.isChunked
+		? mClientReadBuffers[fd]
+		: mClientReadBuffers[fd].substr(0, state.contentLength);
+
+	if (writeUploadFile(fullPath, body))
 	{
 		if (alreadyExisted)
 			sendResponseAndCleanup(fd, buildResponse(200, "OK",
@@ -816,6 +814,9 @@ bool Server::parseHeaderLines(const std::string &headerBlock, HttpRequest &req)
 			return false;
 
 		std::string name = line.substr(0, colon);
+		if (name.empty() || name.find_first_of(" \t") != std::string::npos)
+			return false;
+
 		std::string value = line.substr(colon + 1);
 
 		size_t valueStart = value.find_first_not_of(' ');
@@ -863,15 +864,16 @@ bool Server::writeClientData(int fd)
 
 void Server::closeClient(size_t i)
 {
-	mClientReadBuffers.erase(mPollFds[i].fd);
-	mClientWriteBuffers.erase(mPollFds[i].fd);
-	mClientStates.erase(mPollFds[i].fd);
-	mClientListenSockets.erase(mPollFds[i].fd);
-	mClientLastActivity.erase(mPollFds[i].fd);
-	close(mPollFds[i].fd);
+	int fd = mPollFds[i].fd;
+
+	mClientReadBuffers.erase(fd);
+	mClientWriteBuffers.erase(fd);
+	mClientStates.erase(fd);
+	mClientListenSockets.erase(fd);
+	mClientLastActivity.erase(fd);
+	close(fd);
 	mPollFds.erase(mPollFds.begin() + i);
 }
-
 
 
 void Server::addListeningSockets()
