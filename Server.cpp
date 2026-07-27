@@ -273,7 +273,8 @@ static const StatusEntry StatusTable[] =
 	{ 404, "Not Found" },
 	{ 405, "Method Not Allowed" },
 	{ 413, "Payload Too Large" },
-	{ 500, "Internal Server Error" }
+	{ 500, "Internal Server Error" },
+	{ 501, "Not Implemented" }
 };
 
 static std::string statusTextFor(int statusCode)
@@ -707,8 +708,32 @@ void Server::deleteHandle(ClientRequestState &state, LocationConfig *loc, int fd
 		"<html><body><h1>200 OK</h1><p>Deleted</p></body></html>"));
 }
 
+bool Server::isCgiRequest(LocationConfig *loc, const std::string &path)
+{
+	if (loc->cgiExtension.empty())
+		return (false);
+	if (path.size() < loc->cgiExtension.size())
+		return (false);
+	return (path.compare(path.size() - loc->cgiExtension.size(), loc->cgiExtension.size(), loc->cgiExtension) == 0);
+}
+
+void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+
+	// The rest is yours mertilhanss.
+	(void)state;
+	(void)loc;
+	sendErrorAndCleanup(fd, 501);
+}
+
 void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int fd)
 {
+	if (isCgiRequest(loc, state.request.path))
+	{
+		cgiHandle(state, loc, fd);
+		return;
+	}
+
 	if (state.request.method == "GET")
 	{
 		getHandle(state, loc, fd);

@@ -111,6 +111,8 @@ private:
 	bool isPollout(size_t i);
 	bool isClientTimedOut(size_t i);
 	void controlMethod(ClientRequestState &state, LocationConfig *loc, int fd);
+	bool isCgiRequest(LocationConfig *loc, const std::string &path);
+	void cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 	void getHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 	void postHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 	void deleteHandle(ClientRequestState &state, LocationConfig *loc, int fd);
