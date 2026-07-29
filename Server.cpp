@@ -183,6 +183,29 @@ void Server::acceptNewClient(int listenFd)
     mPollFds.push_back(pfd);
 }
 
+
+static std::string urlDecodePath(const std::string &path)
+{
+	std::string out;
+	out.reserve(path.size());
+
+	for (size_t i = 0; i < path.size(); ++i)
+	{
+		if (path[i] == '%' && i + 2 < path.size()
+			&& std::isxdigit(static_cast<unsigned char>(path[i + 1]))
+			&& std::isxdigit(static_cast<unsigned char>(path[i + 2])))
+		{
+			int value = static_cast<int>(std::strtol(path.substr(i + 1, 2).c_str(), NULL, 16));
+			out += static_cast<char>(value);
+			i += 2;
+		}
+		else
+			out += path[i];
+	}
+
+	return (out);
+}
+
 bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 {
 	std::istringstream iss(line);
@@ -202,6 +225,8 @@ bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 		req.query = req.path.substr(qpos + 1);
 		req.path = req.path.substr(0, qpos);
 	}
+
+	req.path = urlDecodePath(req.path);
 
 	return (true);
 }
