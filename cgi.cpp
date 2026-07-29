@@ -77,7 +77,7 @@ static void buildCgiEnv(const HttpRequest &req, ServerConfig *cfg, const std::st
 	addEnv(env, "REDIRECT_STATUS", "200");
 	addEnv(env, "CONTENT_LENGTH", numToString(static_cast<long>(bodySize)));
 
-	std::map<std::string, std::string>::const_iterator ctIt = req.headers.find("Content-Type");
+	std::map<std::string, std::string>::const_iterator ctIt = req.headers.find("content-type");
 	addEnv(env, "CONTENT_TYPE", ctIt != req.headers.end() ? ctIt->second : "");
 
 	if (cfg)
@@ -88,7 +88,7 @@ static void buildCgiEnv(const HttpRequest &req, ServerConfig *cfg, const std::st
 
 	for (std::map<std::string, std::string>::const_iterator it = req.headers.begin(); it != req.headers.end(); ++it)
 	{
-		if (it->first == "Content-Type" || it->first == "Content-Length")
+		if (it->first == "content-type" || it->first == "content-length")
 			continue;
 		addEnv(env, toHttpEnvName(it->first), it->second);
 	}
@@ -189,11 +189,9 @@ bool Server::isCgiRequest(LocationConfig *loc, const std::string &path)
  */
 void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 {
-	// CGI pipe'ının okuma ucu erkenden kapanırsa write() SIGPIPE fırlatıp
-	// tüm process'i öldürebilir; subject'te "signal" izinli fonksiyon olduğu
-	// için burada yok sayıyoruz (errno'ya bakmadan, sadece disposition).
-	signal(SIGPIPE, SIG_IGN);
-
+	// SIGPIPE ignore artık main.cpp'de process başlarken bir kere set
+	// ediliyor (client soket write()'ları için de gerekliydi); CGI pipe
+	// yazmaları da aynı disposition'dan faydalanıyor.
 	std::string scriptPath = resolveFilePath(loc, state.request.path);
 	if (scriptPath.empty())
 	{

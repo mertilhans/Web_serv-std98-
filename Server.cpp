@@ -15,10 +15,9 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstdlib>
+#include <cctype>
 #include <map>
 #include <string>
-// sys/wait.h, csignal, algorithm (waitpid/kill/signal/std::min) artık
-// burada kullanılmıyor -- CGI koduyla birlikte cgi.cpp'ye taşındı.
 
 #define POLL_TIMEOUT_MS 1000
 #define CLIENT_TIMEOUT_SECONDS 30
@@ -333,11 +332,11 @@ void Server::sendErrorAndCleanup(int fd, int statusCode)
 
 bool Server::contentLengthCheck(ClientRequestState &state, int fd)
 {
-	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
+	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("content-length");
 	if (clIt != state.request.headers.end())
 		state.contentLength = static_cast<size_t>(std::atol(clIt->second.c_str()));
 
-	std::map<std::string, std::string>::iterator teIt = state.request.headers.find("Transfer-Encoding");
+	std::map<std::string, std::string>::iterator teIt = state.request.headers.find("transfer-encoding");
 	if (teIt != state.request.headers.end() && teIt->second.find("chunked") != std::string::npos)
 		state.isChunked = true;
 
@@ -432,7 +431,7 @@ ServerConfig *Server::selectServerConfig(int fd)
 
 	ListenSocket *ls = it->second;
 
-	std::string host = mClientStates[fd].request.headers["Host"];
+	std::string host = mClientStates[fd].request.headers["host"];
 	size_t colon = host.find(':');
 	if (colon != std::string::npos)
 		host = host.substr(0, colon);
@@ -742,8 +741,7 @@ void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int f
 		return;
 	}
 
-	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
-	sendResponseAndCleanup(fd, buildResponse(200, "OK", body));
+	sendErrorAndCleanup(fd, 501);
 }
 
 void Server::finalizeRequest(int fd)
@@ -808,9 +806,21 @@ void Server::processClient(int fd)
 }
 
 
+// RFC 7230 3.2: header adları case-insensitive'dir. Karşılaştırmaları
+// basit tutmak için hepsini saklarken lowercase'e normalize ediyoruz
+// (client "Content-Length" da gönderse "content-length" de gönderse
+// aynı key altında saklanır); header değerleri olduğu gibi kalır.
+static std::string toLowerHeaderName(const std::string &name)
+{
+	std::string out = name;
+	for (size_t i = 0; i < out.size(); ++i)
+		out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[i])));
+	return (out);
+}
+
 bool Server::parseHeaderLines(const std::string &headerBlock, HttpRequest &req)
 {
-	
+
 	size_t lineStart = headerBlock.find("\r\n");
 	if (lineStart == std::string::npos)
 		return true;
@@ -837,7 +847,7 @@ bool Server::parseHeaderLines(const std::string &headerBlock, HttpRequest &req)
 		size_t valueStart = value.find_first_not_of(' ');
 		value = (valueStart == std::string::npos) ? "" : value.substr(valueStart);
 
-		req.headers[name] = value;
+		req.headers[toLowerHeaderName(name)] = value;
 
 		lineStart = lineEnd + 2;
 	}

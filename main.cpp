@@ -2,6 +2,7 @@
 #include <vector>
 #include <iostream>
 #include <exception>
+#include <csignal>
 
 #include "configparser.hpp"
 #include "Server.hpp"
@@ -16,6 +17,12 @@ int main(int argc, char **argv)
         std::cerr << "usage: ./webserv [config_file]" << std::endl;
         return 1;
     }
+
+    // Client bağlantıyı aniden keserse (RST) ve tam o sırada write()
+    // çağrılırsa kernel SIGPIPE gönderir; varsayılan davranış process'i
+    // sonlandırır. Subject "hiçbir koşulda çökmemeli" diyor, o yüzden
+    // ilk I/O'dan önce, process başlarken bir kere ignore ediyoruz.
+    signal(SIGPIPE, SIG_IGN);
 
     try {
         ConfigParser parser;
