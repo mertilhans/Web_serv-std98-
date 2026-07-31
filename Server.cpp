@@ -46,7 +46,7 @@ void addrInfoData(struct addrinfo *info)
 	info->ai_socktype = SOCK_STREAM;
 	info->ai_flags    = AI_NUMERICHOST;
 }
-void Server::listen_data(ServerConfig *cfg)
+void Server::listenData(ServerConfig *cfg)
 {
 	ListenSocket ls;
 	ls.fd   = createListenSocket(cfg->host, cfg->port);
@@ -56,7 +56,7 @@ void Server::listen_data(ServerConfig *cfg)
 	mListenSockets.push_back(ls);
 }
 
-void socket_and_bind(struct addrinfo *res, int *fd)
+void socketAndBind(struct addrinfo *res, int *fd)
 {
 	for (struct addrinfo *it = res; it != NULL; it = it->ai_next)
 	{
@@ -95,7 +95,7 @@ int Server::createListenSocket(const std::string &host, int port)
     }
 
 	int fd = -1;
-	socket_and_bind(res, &fd);
+	socketAndBind(res, &fd);
 	freeaddrinfo(res);
     if (fd == -1)
         throw std::runtime_error(host + ":" + portStream.str() + ": " + strerror(errno));
@@ -133,7 +133,7 @@ void Server::setupSockets()
             existing->configs.push_back(&cfg);
             continue;
         }
-		listen_data(&cfg);
+		listenData(&cfg);
     }
 }
 
@@ -280,20 +280,13 @@ std::string Server::getContentType(const std::string &path)
 }
 
 
-std::string Server::buildRedirect(const std::string &location)
+static const StatusEntry StatusTable[] =
 {
-	std::ostringstream redirect;
-	redirect << "HTTP/1.1 301 Moved Permanently\r\n"
-		<< "Location: " << location << "\r\n"
-		<< "Content-Length: 0\r\n"
-		<< "Connection: close\r\n"
-		<< "\r\n";
-	return (redirect.str());
-}
-
-
-static const StatusEntry StatusTable[] = 
-{
+	{ 301, "Moved Permanently" },
+	{ 302, "Found" },
+	{ 303, "See Other" },
+	{ 307, "Temporary Redirect" },
+	{ 308, "Permanent Redirect" },
 	{ 400, "Bad Request" },
 	{ 403, "Forbidden" },
 	{ 404, "Not Found" },
@@ -312,6 +305,17 @@ static std::string statusTextFor(int statusCode)
 			return (StatusTable[i].text);
 	}
 	return ("Error");
+}
+
+std::string Server::buildRedirect(const std::string &location, int statusCode)
+{
+	std::ostringstream redirect;
+	redirect << "HTTP/1.1 " << statusCode << " " << statusTextFor(statusCode) << "\r\n"
+		<< "Location: " << location << "\r\n"
+		<< "Content-Length: 0\r\n"
+		<< "Connection: close\r\n"
+		<< "\r\n";
+	return (redirect.str());
 }
 
 std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
@@ -782,7 +786,7 @@ void Server::finalizeRequest(int fd)
 
 	if (!loc->redirectTarget.empty())
 	{
-		sendResponseAndCleanup(fd, buildRedirect(loc->redirectTarget));
+		sendResponseAndCleanup(fd, buildRedirect(loc->redirectTarget, loc->redirectCode));
 		return;
 	}
 
@@ -1013,9 +1017,14 @@ void Server::listeningSockets()
 			}
 			else
 			{
+				// Eval kuralı: "only one read or one write per client per
+				// select()" -- aynı fd'de POLLIN ve POLLOUT aynı anda hazır
+				// olsa bile bu turda sadece biri işlenir, diğeri (varsa) bir
+				// sonraki poll() turuna kalır (hemen tekrar tetiklenir, veri
+				// kaybı olmaz).
 				if (mPollFds[i].revents & POLLIN)
 					erased = isPollin(i);
-				if (!erased && (mPollFds[i].revents & POLLOUT))
+				else if (mPollFds[i].revents & POLLOUT)
 					erased = isPollout(i);
 				if (!erased && isClientTimedOut(i))
 				{

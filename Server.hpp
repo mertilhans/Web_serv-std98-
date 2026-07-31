@@ -98,7 +98,7 @@ private:
     Server &operator=(const Server &other);
 
     int createListenSocket(const std::string &host, int port);
-    void listen_data(ServerConfig *cfg);
+    void listenData(ServerConfig *cfg);
 
     bool isListeningSocket(int fd) const;
     ListenSocket *findListenSocket(int fd);
@@ -126,7 +126,7 @@ private:
     std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body, const std::string &contentType = "text/html");
     std::string getContentType(const std::string &path);
     std::string buildErrorResponse(int statusCode, ServerConfig *cfg);
-    std::string buildRedirect(const std::string &location);
+    std::string buildRedirect(const std::string &location, int statusCode = 301);
     void sendErrorAndCleanup(int fd, int statusCode);
     void sendResponseAndCleanup(int fd, const std::string &response);
     void closeClient(size_t i);
@@ -141,7 +141,8 @@ private:
 	// eklendi (subject: "only 1 poll() for all I/O operations").
 	bool isCgiPipe(int pollFd) const;
 	bool handleCgiPipeEvent(size_t i);
-	void cleanupCgiFds(CgiSession &session);
+	void registerCgiSession(pid_t pid, int fd, int inPipe[2], int outPipe[2], const std::string &body);
+	void closeCgiFds(CgiSession &session);
 	void removePipeFromPoll(int pipeFd);
 	void setClientPollEvents(int clientFd, short events);
 	void getHandle(ClientRequestState &state, LocationConfig *loc, int fd);

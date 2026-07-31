@@ -5,20 +5,13 @@
 #include <vector>
 #include <map>
 
-// NOT: Bu struct'ların alan adları/tipleri Server.hpp/Server.cpp'nin
-// beklediği şekille BİREBİR aynı (host/port tek listen, index tek dosya,
-// cgiExtension tek uzantı, serverNames çoklu isim). Tuzan'ın tuzans/
-// klasöründeki parser'ı daha zengin bir model kullanıyor (çoklu listen,
-// çoklu index, cgi_extension->interpreter map'i) ama Server.cpp'ye HİÇ
-// dokunmamak için parser'ın validasyon/parse mantığı buraya, bu daha
-// basit struct şekline hedeflenerek taşındı. cgiInterpreter/redirectCode
-// alanları Tuzan'ın directive'lerinden geliyor ama Server.cpp henüz
-// bunları okumuyor -- ileride CGI/redirect tarafı genişleyince kullanılabilir.
-// Tuzan'ın ConfigStructs.hpp'sindeki gibi her alan için ayrı bir hasX bool'u
-// var -- amacı: parser aynı directive'i aynı blok içinde İKİNCİ kez görürse
-// (örn. iki tane "root ...;") sessizce üzerine yazmak yerine hata versin.
-// Server.cpp bu bool'ları hiç okumuyor, sadece configparser.cpp içindeki
-// duplicate-directive kontrolü için var.
+// Bu dosya artık SADECE Server.hpp/Server.cpp'nin beklediği basit struct
+// şeklini sağlıyor (host/port tek listen, index tek dosya, cgiExtension
+// tek uzantı, serverNames çoklu isim). Gerçek parse işini artık
+// ConfigParser.hpp/cpp + ConfigStructs.hpp (namespace raw) yapıyor --
+// main.cpp, raw::ServerConfig listesini parse ettikten sonra
+// convertConfigs() ile buradaki basit ServerConfig'e çeviriyor. Böylece
+// Server.cpp/Server.hpp hiç değişmeden kalabiliyor.
 struct LocationConfig
 {
 	std::string              path;
@@ -40,7 +33,14 @@ struct LocationConfig
 	std::string              redirectTarget;
 	int                      redirectCode;   // "return 301 /path;" -> 301
 
-	LocationConfig();
+	LocationConfig()
+		: hasAllowMethods(false), hasRoot(false), hasIndex(false),
+		  hasAutoindex(false), autoindex(false), hasClientMaxBodySize(false),
+		  hasUploadPath(false), hasCgiExtension(false), hasRedirect(false),
+		  redirectCode(0)
+	{
+		methods.push_back("GET");
+	}
 };
 
 struct ServerConfig
@@ -55,66 +55,11 @@ struct ServerConfig
 	size_t                      clientMaxBodySize;
 	std::vector<LocationConfig> locations;
 
-	ServerConfig();
-};
-
-class ConfigParser
-{
-public:
-	ConfigParser();
-	~ConfigParser();
-
-	std::vector<ServerConfig> parse(const std::string &path);
-
-private:
-	ConfigParser(const ConfigParser &other);
-	ConfigParser &operator=(const ConfigParser &other);
-
-	struct Token
+	ServerConfig()
+		: hasListen(false), port(8080), hasServerName(false),
+		  hasClientMaxBodySize(false), clientMaxBodySize(1024UL * 1024UL)
 	{
-		std::string value;
-		int         line;
-	};
-
-	std::string         _path;
-	std::vector<Token>  _tokens;
-	size_t              _pos;
-
-	// Okuma + tokenize
-	std::string _readFile(const std::string &path) const;
-	void        _tokenize(const std::string &raw);
-
-	// Token akışı yardımcıları
-	bool               _atEnd() const;
-	const std::string &_peek() const;
-	std::string        _next();
-	void               _expect(const std::string &value);
-	void               _throwSyntaxError(const std::string &msg) const;
-	void               _throwSyntaxErrorAt(const Token &tok, const std::string &msg) const;
-
-	// Parse
-	ServerConfig _parseServerBlock();
-	void         _parseServerDirective(ServerConfig &server);
-	void         _parseLocationBlock(ServerConfig &server);
-	void         _parseLocationDirective(LocationConfig &location);
-
-	// Tuzan'ın ConfigParser'ından uyarlanan validasyon yardımcıları
-	// (tuzans/sources/ConfigParser.cpp _isValidDirPath/_isValidFilename/
-	// _isValidLocationPath/_isValidServerName/_isNumeric/_parseSizeValue/
-	// _isValidErrorPageCode ile aynı kurallar).
-	bool   _isNumeric(const std::string &s) const;
-	bool   _isValidDirPath(const std::string &path) const;
-	bool   _isValidFilename(const std::string &name) const;
-	bool   _isValidLocationPath(const std::string &uri) const;
-	bool   _isValidServerName(const std::string &name) const;
-	bool   _isValidErrorPageCode(int code) const;
-	size_t _parseSizeValue(const std::string &raw) const;
-	void   _validateListenHost(const std::string &host) const;
-
-	// Tuzan'ın ListenTable::_checkServerNameConflicts'inden uyarlandı:
-	// aynı host:port üzerinde aynı server_name (boş isim dahil) varsa
-	// Host header ile ayırt edilemez -> reddet.
-	void _checkServerNameConflicts(const std::vector<ServerConfig> &servers) const;
+	}
 };
 
 #endif
