@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstdlib>
+#include <cctype>
 #include <map>
 #include <string>
 
@@ -45,7 +46,7 @@ void addrInfoData(struct addrinfo *info)
 	info->ai_socktype = SOCK_STREAM;
 	info->ai_flags    = AI_NUMERICHOST;
 }
-void Server::listen_data(ServerConfig *cfg)
+void Server::listenData(ServerConfig *cfg)
 {
 	ListenSocket ls;
 	ls.fd   = createListenSocket(cfg->host, cfg->port);
@@ -55,7 +56,7 @@ void Server::listen_data(ServerConfig *cfg)
 	mListenSockets.push_back(ls);
 }
 
-void socket_and_bind(struct addrinfo *res, int *fd)
+void socketAndBind(struct addrinfo *res, int *fd)
 {
 	for (struct addrinfo *it = res; it != NULL; it = it->ai_next)
 	{
@@ -94,7 +95,7 @@ int Server::createListenSocket(const std::string &host, int port)
     }
 
 	int fd = -1;
-	socket_and_bind(res, &fd);
+	socketAndBind(res, &fd);
 	freeaddrinfo(res);
     if (fd == -1)
         throw std::runtime_error(host + ":" + portStream.str() + ": " + strerror(errno));
@@ -132,7 +133,7 @@ void Server::setupSockets()
             existing->configs.push_back(&cfg);
             continue;
         }
-		listen_data(&cfg);
+		listenData(&cfg);
     }
 }
 
@@ -182,6 +183,29 @@ void Server::acceptNewClient(int listenFd)
     mPollFds.push_back(pfd);
 }
 
+
+static std::string urlDecodePath(const std::string &path)
+{
+	std::string out;
+	out.reserve(path.size());
+
+	for (size_t i = 0; i < path.size(); ++i)
+	{
+		if (path[i] == '%' && i + 2 < path.size()
+			&& std::isxdigit(static_cast<unsigned char>(path[i + 1]))
+			&& std::isxdigit(static_cast<unsigned char>(path[i + 2])))
+		{
+			int value = static_cast<int>(std::strtol(path.substr(i + 1, 2).c_str(), NULL, 16));
+			out += static_cast<char>(value);
+			i += 2;
+		}
+		else
+			out += path[i];
+	}
+
+	return (out);
+}
+
 bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 {
 	std::istringstream iss(line);
@@ -201,6 +225,8 @@ bool Server::parseRequestLine(const std::string &line, HttpRequest &req)
 		req.query = req.path.substr(qpos + 1);
 		req.path = req.path.substr(0, qpos);
 	}
+
+	req.path = urlDecodePath(req.path);
 
 	return (true);
 }
@@ -254,20 +280,13 @@ std::string Server::getContentType(const std::string &path)
 }
 
 
-std::string Server::buildRedirect(const std::string &location)
+static const StatusEntry StatusTable[] =
 {
-	std::ostringstream redirect;
-	redirect << "HTTP/1.1 301 Moved Permanently\r\n"
-		<< "Location: " << location << "\r\n"
-		<< "Content-Length: 0\r\n"
-		<< "Connection: close\r\n"
-		<< "\r\n";
-	return (redirect.str());
-}
-
-
-static const StatusEntry StatusTable[] = 
-{
+	{ 301, "Moved Permanently" },
+	{ 302, "Found" },
+	{ 303, "See Other" },
+	{ 307, "Temporary Redirect" },
+	{ 308, "Permanent Redirect" },
 	{ 400, "Bad Request" },
 	{ 403, "Forbidden" },
 	{ 404, "Not Found" },
@@ -286,6 +305,17 @@ static std::string statusTextFor(int statusCode)
 			return (StatusTable[i].text);
 	}
 	return ("Error");
+}
+
+std::string Server::buildRedirect(const std::string &location, int statusCode)
+{
+	std::ostringstream redirect;
+	redirect << "HTTP/1.1 " << statusCode << " " << statusTextFor(statusCode) << "\r\n"
+		<< "Location: " << location << "\r\n"
+		<< "Content-Length: 0\r\n"
+		<< "Connection: close\r\n"
+		<< "\r\n";
+	return (redirect.str());
 }
 
 std::string Server::buildErrorResponse(int statusCode, ServerConfig *cfg)
@@ -331,11 +361,11 @@ void Server::sendErrorAndCleanup(int fd, int statusCode)
 
 bool Server::contentLengthCheck(ClientRequestState &state, int fd)
 {
-	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("Content-Length");
+	std::map<std::string, std::string>::iterator clIt = state.request.headers.find("content-length");
 	if (clIt != state.request.headers.end())
 		state.contentLength = static_cast<size_t>(std::atol(clIt->second.c_str()));
 
-	std::map<std::string, std::string>::iterator teIt = state.request.headers.find("Transfer-Encoding");
+	std::map<std::string, std::string>::iterator teIt = state.request.headers.find("transfer-encoding");
 	if (teIt != state.request.headers.end() && teIt->second.find("chunked") != std::string::npos)
 		state.isChunked = true;
 
@@ -430,7 +460,7 @@ ServerConfig *Server::selectServerConfig(int fd)
 
 	ListenSocket *ls = it->second;
 
-	std::string host = mClientStates[fd].request.headers["Host"];
+	std::string host = mClientStates[fd].request.headers["host"];
 	size_t colon = host.find(':');
 	if (colon != std::string::npos)
 		host = host.substr(0, colon);
@@ -708,23 +738,11 @@ void Server::deleteHandle(ClientRequestState &state, LocationConfig *loc, int fd
 		"<html><body><h1>200 OK</h1><p>Deleted</p></body></html>"));
 }
 
-bool Server::isCgiRequest(LocationConfig *loc, const std::string &path)
-{
-	if (loc->cgiExtension.empty())
-		return (false);
-	if (path.size() < loc->cgiExtension.size())
-		return (false);
-	return (path.compare(path.size() - loc->cgiExtension.size(), loc->cgiExtension.size(), loc->cgiExtension) == 0);
-}
-
-void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
-{
-
-	// The rest is yours mertilhanss.
-	(void)state;
-	(void)loc;
-	sendErrorAndCleanup(fd, 501);
-}
+// isCgiRequest / cgiHandle / isCgiPipe / handleCgiPipeEvent / cleanupCgiFds /
+// removePipeFromPoll / setClientPollEvents implementasyonları buradan
+// cgi.cpp'ye taşındı (Server.hpp'deki bildirimler aynı kaldı, sadece
+// gövdeler başka dosyada). Aşağıdaki controlMethod ve daha aşağıdaki
+// listeningSockets() bu fonksiyonları çağırıyor, tanım cgi.cpp'de.
 
 void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int fd)
 {
@@ -752,8 +770,7 @@ void Server::controlMethod(ClientRequestState &state, LocationConfig *loc, int f
 		return;
 	}
 
-	std::string body = "<html><body><h1>It works!</h1><p>matched location: " + loc->path + "</p></body></html>";
-	sendResponseAndCleanup(fd, buildResponse(200, "OK", body));
+	sendErrorAndCleanup(fd, 501);
 }
 
 void Server::finalizeRequest(int fd)
@@ -769,7 +786,7 @@ void Server::finalizeRequest(int fd)
 
 	if (!loc->redirectTarget.empty())
 	{
-		sendResponseAndCleanup(fd, buildRedirect(loc->redirectTarget));
+		sendResponseAndCleanup(fd, buildRedirect(loc->redirectTarget, loc->redirectCode));
 		return;
 	}
 
@@ -818,9 +835,21 @@ void Server::processClient(int fd)
 }
 
 
+// RFC 7230 3.2: header adları case-insensitive'dir. Karşılaştırmaları
+// basit tutmak için hepsini saklarken lowercase'e normalize ediyoruz
+// (client "Content-Length" da gönderse "content-length" de gönderse
+// aynı key altında saklanır); header değerleri olduğu gibi kalır.
+static std::string toLowerHeaderName(const std::string &name)
+{
+	std::string out = name;
+	for (size_t i = 0; i < out.size(); ++i)
+		out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[i])));
+	return (out);
+}
+
 bool Server::parseHeaderLines(const std::string &headerBlock, HttpRequest &req)
 {
-	
+
 	size_t lineStart = headerBlock.find("\r\n");
 	if (lineStart == std::string::npos)
 		return true;
@@ -847,7 +876,7 @@ bool Server::parseHeaderLines(const std::string &headerBlock, HttpRequest &req)
 		size_t valueStart = value.find_first_not_of(' ');
 		value = (valueStart == std::string::npos) ? "" : value.substr(valueStart);
 
-		req.headers[name] = value;
+		req.headers[toLowerHeaderName(name)] = value;
 
 		lineStart = lineEnd + 2;
 	}
@@ -978,14 +1007,30 @@ void Server::listeningSockets()
 		while (i < mPollFds.size())
 		{
 			bool erased = false;
-			if (mPollFds[i].revents & POLLIN)
-				erased = isPollin(i);
-			if (!erased && (mPollFds[i].revents & POLLOUT))
-				erased = isPollout(i);
-			if (!erased && isClientTimedOut(i))
+
+			// CGI pipe fd'leri de bu TEK poll()'den geçiyor (subject: "only 1
+			// poll() for all I/O"), o yüzden client soketi mantığından önce
+			// ayırıyoruz. Aşağıdaki orijinal client dallanmasına dokunmadım.
+			if (isCgiPipe(mPollFds[i].fd))
 			{
-				closeClient(i);
-				erased = true;
+				erased = handleCgiPipeEvent(i);
+			}
+			else
+			{
+				// Eval kuralı: "only one read or one write per client per
+				// select()" -- aynı fd'de POLLIN ve POLLOUT aynı anda hazır
+				// olsa bile bu turda sadece biri işlenir, diğeri (varsa) bir
+				// sonraki poll() turuna kalır (hemen tekrar tetiklenir, veri
+				// kaybı olmaz).
+				if (mPollFds[i].revents & POLLIN)
+					erased = isPollin(i);
+				else if (mPollFds[i].revents & POLLOUT)
+					erased = isPollout(i);
+				if (!erased && isClientTimedOut(i))
+				{
+					closeClient(i);
+					erased = true;
+				}
 			}
 			if (!erased)
 				++i;

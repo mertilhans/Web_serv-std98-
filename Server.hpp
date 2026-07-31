@@ -6,7 +6,8 @@
 #include <map>
 #include <ctime>
 #include <poll.h>
-#include "configpars.hpp"
+#include <sys/types.h> // pid_t (CgiSession) için eklendi
+#include "configparser.hpp"
 
 
 struct StatusEntry
@@ -53,6 +54,23 @@ struct ListenSocket
     std::vector<ServerConfig*>  configs;
 };
 
+// CGI'yi ana poll() döngüsüne katmak için: subject "sadece 1 poll()" diyor,
+// bu yüzden CGI pipe'ları da mPollFds'e girip aynı poll() turunda okunup
+// yazılıyor, ayrı/nested bir poll() döngüsü yok.
+struct CgiSession
+{
+    pid_t       pid;
+    int         clientFd;
+    int         inFd;
+    int         outFd;
+    std::string body;
+    size_t      written;
+    std::string output;
+    time_t      start;
+
+    CgiSession() : pid(-1), clientFd(-1), inFd(-1), outFd(-1), written(0), start(0) {}
+};
+
 class Server
 {
 public:
@@ -70,12 +88,17 @@ private:
     std::map<int, ClientRequestState> mClientStates;
     std::map<int, ListenSocket*> mClientListenSockets;
     std::map<int, time_t> mClientLastActivity;
+    // Devam eden CGI çalıştırmalarını (pipe fd'leri dahil) tutmak için
+    // eklendi; böylece cgiHandle bloklamadan dönebiliyor ve gerçek okuma/
+    // yazma ana poll() sonucuna göre tetikleniyor.
+    std::map<int, CgiSession> mCgiSessions;   // key: session.outFd
+    std::map<int, int> mCgiPipeOwner;         // herhangi bir cgi fd -> session key (outFd)
 
     Server(const Server &other);
     Server &operator=(const Server &other);
 
     int createListenSocket(const std::string &host, int port);
-    void listen_data(ServerConfig *cfg);
+    void listenData(ServerConfig *cfg);
 
     bool isListeningSocket(int fd) const;
     ListenSocket *findListenSocket(int fd);
@@ -103,7 +126,7 @@ private:
     std::string buildResponse(int statusCode, const std::string &statusText, const std::string &body, const std::string &contentType = "text/html");
     std::string getContentType(const std::string &path);
     std::string buildErrorResponse(int statusCode, ServerConfig *cfg);
-    std::string buildRedirect(const std::string &location);
+    std::string buildRedirect(const std::string &location, int statusCode = 301);
     void sendErrorAndCleanup(int fd, int statusCode);
     void sendResponseAndCleanup(int fd, const std::string &response);
     void closeClient(size_t i);
@@ -113,6 +136,15 @@ private:
 	void controlMethod(ClientRequestState &state, LocationConfig *loc, int fd);
 	bool isCgiRequest(LocationConfig *loc, const std::string &path);
 	void cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd);
+	// Aşağıdaki 5 fonksiyon CGI pipe'larını ayrı bir poll() açmadan, ana
+	// listeningSockets() döngüsünün TEK poll()'ü üzerinden yürütmek için
+	// eklendi (subject: "only 1 poll() for all I/O operations").
+	bool isCgiPipe(int pollFd) const;
+	bool handleCgiPipeEvent(size_t i);
+	void registerCgiSession(pid_t pid, int fd, int inPipe[2], int outPipe[2], const std::string &body);
+	void closeCgiFds(CgiSession &session);
+	void removePipeFromPoll(int pipeFd);
+	void setClientPollEvents(int clientFd, short events);
 	void getHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 	void postHandle(ClientRequestState &state, LocationConfig *loc, int fd);
 	void deleteHandle(ClientRequestState &state, LocationConfig *loc, int fd);

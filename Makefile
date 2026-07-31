@@ -1,7 +1,10 @@
 NAME = webserv
 
 SRC = main.cpp\
-		Server.cpp
+		Server.cpp\
+		ConfigParser.cpp\
+		ConfigStructs.cpp\
+		cgi.cpp
 
 CXX = c++
 
@@ -14,8 +17,11 @@ all: $(NAME)
 $(NAME): $(OBJ)
 	$(CXX) $(CXXFLAGS) $(OBJ) -o $(NAME)
 
-main.o: main.cpp configpars.hpp Server.hpp common.hpp
-Server.o: Server.cpp Server.hpp configpars.hpp common.hpp
+main.o: main.cpp configparser.hpp ConfigParser.hpp ConfigStructs.hpp Server.hpp
+Server.o: Server.cpp Server.hpp configparser.hpp common.hpp
+ConfigParser.o: ConfigParser.cpp ConfigParser.hpp ConfigStructs.hpp
+ConfigStructs.o: ConfigStructs.cpp ConfigStructs.hpp
+cgi.o: cgi.cpp cgi.hpp Server.hpp configparser.hpp common.hpp
 
 clean:
 	rm -f $(OBJ)
