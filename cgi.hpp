@@ -14,6 +14,7 @@ struct CgiOutput
 	std::string statusText;
 	std::string contentType;
 	std::string location;
+	std::string setCookie; 
 	std::string body;
 
 	CgiOutput();

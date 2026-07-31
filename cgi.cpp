@@ -151,7 +151,23 @@ static void parseCgiOutput(const std::string &raw, CgiOutput &out)
 			out.contentType = value;
 		else if (name == "Location")
 			out.location = value;
+		else if (name == "Set-Cookie")
+			out.setCookie = value;
 	}
+}
+
+// buildResponse (Server.cpp) Set-Cookie diye bir parametre bilmiyor; onu
+// değiştirmek yerine, zaten kurulmuş header'lı response string'inin son
+// boş satırından (header/body ayracı) hemen önce Set-Cookie satırını
+// araya sokuyoruz. Cookie yoksa response aynen döner.
+static std::string insertSetCookie(const std::string &response, const std::string &cookie)
+{
+	if (cookie.empty())
+		return response;
+	size_t headerEnd = response.find("\r\n\r\n");
+	if (headerEnd == std::string::npos)
+		return response;
+	return response.substr(0, headerEnd) + "\r\nSet-Cookie: " + cookie + response.substr(headerEnd);
 }
 
 bool Server::isCgiRequest(LocationConfig *loc, const std::string &path)
@@ -476,14 +492,13 @@ bool Server::handleCgiPipeEvent(size_t i)
 				mCgiSessions.erase(sessIt);
 
 				if (!cgiOut.location.empty() && cgiOut.statusCode == 200)
-					sendResponseAndCleanup(clientFd, buildRedirect(cgiOut.location));
+					sendResponseAndCleanup(clientFd, insertSetCookie(buildRedirect(cgiOut.location), cgiOut.setCookie));
 				else
-					sendResponseAndCleanup(clientFd, buildResponse(cgiOut.statusCode, cgiOut.statusText, cgiOut.body, cgiOut.contentType));
+					sendResponseAndCleanup(clientFd, insertSetCookie(buildResponse(cgiOut.statusCode, cgiOut.statusText, cgiOut.body, cgiOut.contentType), cgiOut.setCookie));
 			}
 			setClientPollEvents(clientFd, POLLOUT);
 		}
 	}
-
 	// Yukarıdaki inFd/outFd dallarından biri closeCgiFds çağırdıysa index
 	// i'deki satır artık başka bir fd olabilir; closeClient(i)'nin döndürdüğü
 	// "erased" mantığının aynısı (listeningSockets() ++i yapmasın diye).
