@@ -1,10 +1,12 @@
 // CGI implementasyonu -- Server.hpp'de bildirilen Server::isCgiRequest,
 // Server::cgiHandle ve poll-driven CGI pipe yönetimi (isCgiPipe,
-// handleCgiPipeEvent, cleanupCgiFds, removePipeFromPoll,
+// handleCgiPipeEvent, closeCgiFds, removePipeFromPoll,
 // setClientPollEvents) burada tanımlı. Önceden Server.cpp'nin içindeydi,
 // buraya taşındı; Server.hpp'deki bildirimler ve Server.cpp'deki
-// controlMethod'daki çağrı noktası değişmedi.
+// controlMethod'daki çağrı noktası değişmedi. Server sınıfının üyesi
+// olmayan CGI-özel sabit/tip (CGI_TIMEOUT_SECONDS, CgiOutput) cgi.hpp'de.
 #include "Server.hpp"
+#include "cgi.hpp"
 #include "common.hpp"
 
 #include <sys/stat.h>
@@ -17,15 +19,14 @@
 #include <cstdlib>
 #include <sstream>
 #include <ctime>
-#include <cerrno>
-
-#define CGI_TIMEOUT_SECONDS 5 // CGI script'i bu saniyeyi geçerse SIGKILL + 500
+// cerrno kasıtlı olarak yok: subject read/write sonrası errno'ya bakmayı
+// yasaklıyor, o yüzden burada hiç kullanmıyoruz.
 
 // --- cgiHandle'ın kullandığı yardımcılar ---
 
 // Uzantıya göre interpreter seçer; bilinmeyen uzantılarda script'in kendi
 // shebang'ıyla doğrudan çalıştırılmasına düşer (false döner).
-static bool findInterpreter(const std::string &ext, std::string &interpreter)
+static bool resolveInterpreter(const std::string &ext, std::string &interpreter)
 {
 	if (ext == ".py") { interpreter = "python3"; return true; }
 	if (ext == ".pl") { interpreter = "perl"; return true; }
@@ -66,6 +67,14 @@ static void addEnv(std::vector<std::string> &env, const std::string &key, const 
 static void buildCgiEnv(const HttpRequest &req, ServerConfig *cfg, const std::string &scriptPath,
 						size_t bodySize, std::vector<std::string> &env)
 {
+	// PATH olmadan hem "/usr/bin/env <interpreter>" hem script'in kendi
+	// "#!/usr/bin/env ..." shebang'ı sadece env'in built-in fallback yoluna
+	// (genelde /usr/bin:/bin) düşer -- nvm ile kurulu node, homebrew'daki
+	// bazı araçlar orada olmaz. Webserv'i başlatan shell'in kendi PATH'ini
+	// aynen CGI'ye de veriyoruz.
+	const char *pathEnv = std::getenv("PATH");
+	addEnv(env, "PATH", pathEnv ? pathEnv : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+
 	addEnv(env, "GATEWAY_INTERFACE", "CGI/1.1");
 	addEnv(env, "SERVER_PROTOCOL", req.version.empty() ? "HTTP/1.1" : req.version);
 	addEnv(env, "REQUEST_METHOD", req.method);
@@ -77,7 +86,7 @@ static void buildCgiEnv(const HttpRequest &req, ServerConfig *cfg, const std::st
 	addEnv(env, "REDIRECT_STATUS", "200");
 	addEnv(env, "CONTENT_LENGTH", numToString(static_cast<long>(bodySize)));
 
-	std::map<std::string, std::string>::const_iterator ctIt = req.headers.find("content-type");
+	std::map<std::string, std::string>::const_iterator ctIt = req.headers.find("Content-Type");
 	addEnv(env, "CONTENT_TYPE", ctIt != req.headers.end() ? ctIt->second : "");
 
 	if (cfg)
@@ -88,24 +97,17 @@ static void buildCgiEnv(const HttpRequest &req, ServerConfig *cfg, const std::st
 
 	for (std::map<std::string, std::string>::const_iterator it = req.headers.begin(); it != req.headers.end(); ++it)
 	{
-		if (it->first == "content-type" || it->first == "content-length")
+		if (it->first == "Content-Type" || it->first == "Content-Length")
 			continue;
 		addEnv(env, toHttpEnvName(it->first), it->second);
 	}
 }
 
-// parseCgiOutput'un sonucunu taşımak için; buildResponse/buildRedirect'e
-// tek tek parametre geçmek yerine bunu döndürüp cgiHandle'da kullanıyoruz.
-struct CgiOutput
+// CgiOutput struct'ı artık cgi.hpp'de (Server.hpp/configparser.hpp ile aynı
+// .hpp/.cpp eşleşme mantığı) -- ctor'u burada tanımlıyoruz.
+CgiOutput::CgiOutput() : statusCode(200), statusText("OK"), contentType("text/html")
 {
-	int statusCode;
-	std::string statusText;
-	std::string contentType;
-	std::string location;
-	std::string body;
-
-	CgiOutput() : statusCode(200), statusText("OK"), contentType("text/html") {}
-};
+}
 
 // CGI script'inin stdout'una yazdığı "header'lar\r\n\r\nbody" çıktısını ayrıştırır.
 // Status/Content-Type/Location dışındaki header'lar yok sayılır.
@@ -161,125 +163,75 @@ bool Server::isCgiRequest(LocationConfig *loc, const std::string &path)
 	return (path.compare(path.size() - loc->cgiExtension.size(), loc->cgiExtension.size(), loc->cgiExtension) == 0);
 }
 
-/* ESKİ HALİ (silmedim, yorum satırına aldım): burada CGI pipe'ları için
- * cgiHandle kendi İÇİNDE ikinci, ayrı bir poll() döngüsü çalıştırıyordu.
- * Subject bunu açıkça yasaklıyor: "You must use only 1 poll() (or
- * equivalent) for all the I/O operations... pipes/FIFOs must be
- * non-blocking and driven by a single poll()." Aşağıdaki asıl (aktif)
- * cgiHandle artık pipe'ları kurup mPollFds'e (ana poll döngüsüne) kayıt
- * ediyor, gerçek okuma/yazma işini handleCgiPipeEvent yapıyor —
- * listeningSockets() (Server.cpp) zaten tek poll() çağırıyor, CGI da
- * ondan geçiyor.
- *
- * void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
- * {
- * 	std::string scriptPath = resolveFilePath(loc, state.request.path);
- * 	...
- * 	bool timedOut = false;
- * 	while (true)
- * 	{
- * 		if (time(NULL) - start > CGI_TIMEOUT_SECONDS) { timedOut = true; break; }
- * 		struct pollfd pfds[2];
- * 		...
- * 		int ready = poll(pfds, n, 200); // <-- ikinci poll(), yasak
- * 		...
- * 	}
- * 	...
- * }
- */
-void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+// Server.cpp'deki socket_and_bind/createListenSocket ikilisiyle aynı kalıp:
+// düşük seviye OS işini (burada: iki pipe açma) ayrı, sade bir fonksiyona
+// koyup çağıran tarafın sadece başarı/başarısızlığa bakmasını sağlıyor.
+static bool openCgiPipes(int inPipe[2], int outPipe[2])
 {
-	// SIGPIPE ignore artık main.cpp'de process başlarken bir kere set
-	// ediliyor (client soket write()'ları için de gerekliydi); CGI pipe
-	// yazmaları da aynı disposition'dan faydalanıyor.
-	std::string scriptPath = resolveFilePath(loc, state.request.path);
-	if (scriptPath.empty())
-	{
-		sendErrorAndCleanup(fd, 400);
-		return;
-	}
-
-	struct stat st;
-	if (stat(scriptPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-	{
-		sendErrorAndCleanup(fd, 404);
-		return;
-	}
-
-	std::string interpreter;
-	bool useInterpreter = findInterpreter(loc->cgiExtension, interpreter);
-	if (access(scriptPath.c_str(), useInterpreter ? R_OK : X_OK) != 0)
-	{
-		sendErrorAndCleanup(fd, 403);
-		return;
-	}
-
-	int inPipe[2];
 	if (pipe(inPipe) == -1)
-	{
-		sendErrorAndCleanup(fd, 500);
-		return;
-	}
-	int outPipe[2];
+		return false;
 	if (pipe(outPipe) == -1)
 	{
 		close(inPipe[0]);
 		close(inPipe[1]);
-		sendErrorAndCleanup(fd, 500);
-		return;
+		return false;
 	}
+	return true;
+}
 
-	std::vector<std::string> envStorage;
-	buildCgiEnv(state.request, state.matchedConfig, scriptPath, mClientReadBuffers[fd].size(), envStorage);
+// fork() sonrası child'ın YAPTIĞI HER ŞEY burada: pipe'ları stdin/stdout'a
+// bağlama, doğru dizine geçme, script'i çalıştırma. Bu fonksiyon normal
+// şartlarda hiç geri dönmez (execve başarılıysa process image değişir,
+// başarısızsa _exit(1) ile biter).
+static void execCgiChild(int inPipe[2], int outPipe[2], bool useInterpreter,
+						const std::string &interpreter, const std::string &scriptDir,
+						const std::string &scriptFile, char **envp)
+{
+	dup2(inPipe[0], STDIN_FILENO);
+	dup2(outPipe[1], STDOUT_FILENO);
+	close(inPipe[0]); close(inPipe[1]);
+	close(outPipe[0]); close(outPipe[1]);
 
-	std::vector<char *> envp;
-	for (size_t i = 0; i < envStorage.size(); ++i)
-		envp.push_back(const_cast<char *>(envStorage[i].c_str()));
-	envp.push_back(NULL);
-
-	pid_t pid = fork();
-	if (pid == -1)
-	{
-		close(inPipe[0]); close(inPipe[1]);
-		close(outPipe[0]); close(outPipe[1]);
-		sendErrorAndCleanup(fd, 500);
-		return;
-	}
-
-	if (pid == 0)
-	{
-		dup2(inPipe[0], STDIN_FILENO);
-		dup2(outPipe[1], STDOUT_FILENO);
-		close(inPipe[0]); close(inPipe[1]);
-		close(outPipe[0]); close(outPipe[1]);
-
-		if (useInterpreter)
-		{
-			char *argv[] = { const_cast<char *>("env"), const_cast<char *>(interpreter.c_str()),
-							  const_cast<char *>(scriptPath.c_str()), NULL };
-			execve("/usr/bin/env", argv, &envp[0]);
-		}
-		else
-		{
-			char *argv[] = { const_cast<char *>(scriptPath.c_str()), NULL };
-			execve(scriptPath.c_str(), argv, &envp[0]);
-		}
+	// Subject: "The CGI should be run in the correct directory for
+	// relative path file access." chdir() izinli fonksiyon -- script'in
+	// kendi dizinine geçip exec'i o dizine göre relatif dosya adıyla
+	// yapıyoruz (scriptDir/scriptFile cgiHandle'da, buildCgiEnv'den önce
+	// hesaplandı -- SCRIPT_FILENAME de aynı scriptFile'ı kullanıyor,
+	// ikisi tutarlı).
+	if (chdir(scriptDir.c_str()) != 0)
 		_exit(1);
-	}
 
+	if (useInterpreter)
+	{
+		char *argv[] = { const_cast<char *>("env"), const_cast<char *>(interpreter.c_str()),
+						  const_cast<char *>(scriptFile.c_str()), NULL };
+		execve("/usr/bin/env", argv, envp);
+	}
+	else
+	{
+		char *argv[] = { const_cast<char *>(scriptFile.c_str()), NULL };
+		execve(scriptFile.c_str(), argv, envp);
+	}
+	_exit(1);
+}
+
+// fork() sonrası PARENT'ın yaptığı her şey: kullanılmayan pipe uçlarını
+// kapatma, kalanları non-blocking yapma, CgiSession'ı kaydedip ana poll()
+// döngüsüne (mPollFds) ekleme. Buradan sonrası artık blocking değil --
+// gerçek okuma/yazma handleCgiPipeEvent'te olacak.
+void Server::registerCgiSession(pid_t pid, int fd, int inPipe[2], int outPipe[2], const std::string &body)
+{
 	close(inPipe[0]);
 	close(outPipe[1]);
 	fcntl(inPipe[1], F_SETFL, O_NONBLOCK);
 	fcntl(outPipe[0], F_SETFL, O_NONBLOCK);
 
-	// Buradan sonrası artık blocking değil: pipe'ları kaydedip dönüyoruz,
-	// gerçek okuma/yazma ana poll() sonucuna göre handleCgiPipeEvent'te olacak.
 	CgiSession session;
 	session.pid      = pid;
 	session.clientFd = fd;
 	session.inFd     = inPipe[1];
 	session.outFd    = outPipe[0];
-	session.body     = mClientReadBuffers[fd];
+	session.body     = body;
 	session.written  = 0;
 	session.start    = time(NULL);
 
@@ -316,6 +268,81 @@ void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
 	// (cevap mClientWriteBuffers'a konunca); o zamana kadar bu fd'den bir
 	// daha okumayalım diye events'i 0 yapıyoruz.
 	setClientPollEvents(fd, 0);
+}
+
+// Artık cgiHandle sadece akışı okunaklı sırayla yürütüyor: script'i
+// doğrula -> pipe'ları aç -> env'i kur -> fork et -> child'ı çalıştır /
+// parent'ı kaydet. Gerçek iş yukarıdaki dört yardımcıda.
+void Server::cgiHandle(ClientRequestState &state, LocationConfig *loc, int fd)
+{
+	// CGI pipe'ının okuma ucu erkenden kapanırsa write() SIGPIPE fırlatıp
+	// tüm process'i öldürebilir; subject'te "signal" izinli fonksiyon olduğu
+	// için burada yok sayıyoruz (errno'ya bakmadan, sadece disposition).
+	signal(SIGPIPE, SIG_IGN);
+
+	std::string scriptPath = resolveFilePath(loc, state.request.path);
+	if (scriptPath.empty())
+	{
+		sendErrorAndCleanup(fd, 400);
+		return;
+	}
+
+	struct stat st;
+	if (stat(scriptPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+	{
+		sendErrorAndCleanup(fd, 404);
+		return;
+	}
+
+	std::string interpreter;
+	bool useInterpreter = resolveInterpreter(loc->cgiExtension, interpreter);
+	if (access(scriptPath.c_str(), useInterpreter ? R_OK : X_OK) != 0)
+	{
+		sendErrorAndCleanup(fd, 403);
+		return;
+	}
+
+	// Subject: "CGI should be run in the correct directory for relative
+	// path file access." Child chdir(scriptDir) yapacak, o yüzden
+	// SCRIPT_FILENAME/PATH_TRANSLATED gibi env değerleri de child'ın YENİ
+	// çalışma dizinine göre tutarlı olmalı -- ikisini de aynı scriptFile
+	// (sadece dosya adı) ile dolduruyoruz.
+	size_t slash = scriptPath.find_last_of('/');
+	std::string scriptDir  = (slash == std::string::npos) ? "." : scriptPath.substr(0, slash);
+	std::string scriptFile = (slash == std::string::npos) ? scriptPath : scriptPath.substr(slash + 1);
+
+	int inPipe[2];
+	int outPipe[2];
+	if (!openCgiPipes(inPipe, outPipe))
+	{
+		sendErrorAndCleanup(fd, 500);
+		return;
+	}
+
+	std::vector<std::string> envStorage;
+	buildCgiEnv(state.request, state.matchedConfig, scriptFile, mClientReadBuffers[fd].size(), envStorage);
+
+	std::vector<char *> envp;
+	for (size_t i = 0; i < envStorage.size(); ++i)
+		envp.push_back(const_cast<char *>(envStorage[i].c_str()));
+	envp.push_back(NULL);
+
+	pid_t pid = fork();
+	if (pid == -1)
+	{
+		close(inPipe[0]); close(inPipe[1]);
+		close(outPipe[0]); close(outPipe[1]);
+		sendErrorAndCleanup(fd, 500);
+		return;
+	}
+
+	if (pid == 0)
+	{
+		execCgiChild(inPipe, outPipe, useInterpreter, interpreter, scriptDir, scriptFile, &envp[0]);
+		return; // execCgiChild normalde hiç dönmez (execve/_exit), savunma amaçlı
+	}
+
+	registerCgiSession(pid, fd, inPipe, outPipe, mClientReadBuffers[fd]);
 }
 
 // listeningSockets()'teki (Server.cpp) tek poll() döngüsü her fd için
@@ -356,7 +383,7 @@ void Server::setClientPollEvents(int clientFd, short events)
 
 // Bir CGI session'ı bitince (başarı/hata/timeout fark etmez) hem inFd hem
 // outFd için mPollFds/mCgiPipeOwner/close çağrılarını tekrar etmemek için.
-void Server::cleanupCgiFds(CgiSession &session)
+void Server::closeCgiFds(CgiSession &session)
 {
 	if (session.inFd != -1)
 	{
@@ -392,11 +419,11 @@ bool Server::handleCgiPipeEvent(size_t i)
 		int clientFd = session.clientFd;
 		kill(session.pid, SIGKILL);
 		waitpid(session.pid, NULL, 0);
-		cleanupCgiFds(session);
+		closeCgiFds(session);
 		mCgiSessions.erase(sessIt);
 		sendErrorAndCleanup(clientFd, 500);
 		setClientPollEvents(clientFd, POLLOUT);
-		// cleanupCgiFds mPollFds'ten satır(lar) sildiği için index i artık
+		// closeCgiFds mPollFds'ten satır(lar) sildiği için index i artık
 		// başka bir fd'yi gösteriyor olabilir; listeningSockets()'in ++i
 		// yapmaması gerekiyorsa true dönmemiz lazım, bunu index'in hâlâ
 		// aynı fd'yi gösterip göstermediğine bakarak (kaydırmadan bağımsız,
@@ -437,7 +464,7 @@ bool Server::handleCgiPipeEvent(size_t i)
 
 			if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 			{
-				cleanupCgiFds(session);
+				closeCgiFds(session);
 				mCgiSessions.erase(sessIt);
 				sendErrorAndCleanup(clientFd, 500);
 			}
@@ -445,7 +472,7 @@ bool Server::handleCgiPipeEvent(size_t i)
 			{
 				CgiOutput cgiOut;
 				parseCgiOutput(session.output, cgiOut);
-				cleanupCgiFds(session);
+				closeCgiFds(session);
 				mCgiSessions.erase(sessIt);
 
 				if (!cgiOut.location.empty() && cgiOut.statusCode == 200)
@@ -457,7 +484,7 @@ bool Server::handleCgiPipeEvent(size_t i)
 		}
 	}
 
-	// Yukarıdaki inFd/outFd dallarından biri cleanupCgiFds çağırdıysa index
+	// Yukarıdaki inFd/outFd dallarından biri closeCgiFds çağırdıysa index
 	// i'deki satır artık başka bir fd olabilir; closeClient(i)'nin döndürdüğü
 	// "erased" mantığının aynısı (listeningSockets() ++i yapmasın diye).
 	return (i >= mPollFds.size() || mPollFds[i].fd != curFd);
