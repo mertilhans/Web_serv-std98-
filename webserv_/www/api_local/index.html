@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><head><title>api_local</title></head>
+<body style="font-family:sans-serif">
+<h1>api_local</h1>
+<p>Reached via <code>127.0.0.1:9090</code> (the specific-IP server).</p>
+<p>This proves ListenTable's wildcard-merge routing: the same port 9090 also
+has a wildcard server (<code>api_public</code>) on <code>0.0.0.0</code>, but a
+connection landing on <code>127.0.0.1</code> exactly is routed here instead,
+via <code>getsockname()</code> after <code>accept()</code>.</p>
+</body></html>

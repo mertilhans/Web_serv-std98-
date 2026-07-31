@@ -1,0 +1,2 @@
+This directory intentionally has no index.html, so a GET to /browse/
+falls through to autoindex (directory listing) instead of serving a file.
