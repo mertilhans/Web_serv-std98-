@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// hello.py'nin JavaScript (node) karsiligi -- webserv'in birden fazla CGI
-// dilini ayni anda destekledigini gostermek icin. Ayni CGI/1.1 sozlesmesi:
-// baglam env'den, POST body stdin'den, cikti "header'lar + bos satir + body".
+
 "use strict";
 
 function escapeHtml(s) {
