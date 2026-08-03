@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>webserv &mdash; main_site</title>
+	<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+	<header>
+		<h1>webserv</h1>
+		<p>A small HTTP/1.1 server written in C++98, for the 42 <em>webserv</em> project.</p>
+	</header>
+
+	<main>
+		<section>
+			<h2>Try the mandatory features</h2>
+			<ul>
+				<li><a href="/old">/old</a> &mdash; HTTP redirect (301 &rarr; /index.html)</li>
+				<li><a href="/cgi-bin/hello.py?name=webserv">/cgi-bin/hello.py?name=webserv</a> &mdash; CGI (GET, query string)</li>
+				<li><a href="/does-not-exist">/does-not-exist</a> &mdash; default 404 error page</li>
+				<li><code>POST /uploads/&lt;filename&gt;</code> &mdash; file upload</li>
+				<li><code>DELETE /uploads/&lt;filename&gt;</code> &mdash; file delete</li>
+			</ul>
+		</section>
+
+		<section>
+			<h2>Other servers in this config</h2>
+			<ul>
+				<li><code>127.0.0.1:9090</code> &mdash; <strong>api_local</strong> (specific IP)</li>
+				<li><code>&lt;any interface&gt;:9090</code> &mdash; <strong>api_public</strong> (wildcard, merged socket)</li>
+				<li><code>127.0.0.1:9091</code> &mdash; <strong>admin_panel</strong>, with <a href="http://127.0.0.1:9091/browse/">autoindex</a> and custom error pages</li>
+			</ul>
+		</section>
+	</main>
+
+	<footer>
+		<p>webserv/1.0</p>
+	</footer>
+</body>
+</html>
