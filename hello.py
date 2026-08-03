@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal CGI/1.1 script used to demonstrate webserv's CGI support.
 
-Reads the environment variables and (for POST) the request body from
-stdin, then prints a CGI response: a header block, a blank line, then
-the HTML body -- exactly what the subject describes ("the full request
-and arguments provided by the client must be available to the CGI").
-"""
 import os
 import sys
 
